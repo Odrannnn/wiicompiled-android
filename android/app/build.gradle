@@ -9,6 +9,7 @@ android {
 
     buildFeatures { buildConfig true }
     defaultConfig {
+        // Kept for compatibility with private developer builds that still embed a runtime.
         buildConfigField 'boolean', 'WITH_GAME', withGame.toString()
         applicationId 'org.wiicompiled.portlab'
         minSdk 30
@@ -28,11 +29,12 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
     if (withGame) {
-        sourceSets.debug.java.srcDirs += ["src/game/java", "../../private/android-runtime/_deps/sdl-src/android-project/app/src/main/java"]
+        sourceSets.debug.java.srcDirs += ["src/game/java"]
         sourceSets.debug.manifest.srcFile "src/game/AndroidManifest.xml"
         sourceSets.debug.jniLibs.srcDirs += ["../../private/android-apk-libs"]
         packaging.jniLibs.useLegacyPackaging = true
     }
+    sourceSets.main.java.srcDirs += ["src/sdl/java"]
     testOptions { unitTests.returnDefaultValues = true }
 }
 

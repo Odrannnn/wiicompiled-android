@@ -30,9 +30,10 @@ import java.util.concurrent.Executors;
 
 /** Android setup, diagnostics, and local game launcher. */
 public final class MainActivity extends Activity {
-    private static final int PICK_DISC = 1, EXPORT_REPORT = 2, PICK_GPU_DRIVER = 3, PICK_MOD = 4;
+    private static final int PICK_DISC = 1, EXPORT_REPORT = 2, PICK_GPU_DRIVER = 3, PICK_MOD = 4,
+        PICK_RUNTIME_PACK = 5;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
-    private TextView diagnostics, discStatus, gpuDriverStatus, modStatus, retroRewindStatus;
+    private TextView diagnostics, discStatus, gpuDriverStatus, modStatus, retroRewindStatus, runtimeStatus;
     private LinearLayout modsContainer;
     private Button testButton;
     private Button[] navigationButtons;
@@ -101,7 +102,7 @@ public final class MainActivity extends Activity {
         }
         // Local ADB launch hook. GameActivity remains non-exported; MainActivity performs
         // the same explicit in-app transition as the visible experimental launch button.
-        if (BuildConfig.WITH_GAME && getIntent().getBooleanExtra("launchGame", false)) {
+        if (getIntent().getBooleanExtra("launchGame", false)) {
             Intent game = new Intent();
             game.setClassName(this, "org.wiicompiled.portlab.GameActivity");
             startActivity(game);
@@ -111,9 +112,20 @@ public final class MainActivity extends Activity {
     private View buildPlayPage() {
         LinearLayout page = pageContent();
         LinearLayout overview = card("Ready to race",
-            "Launch the local PAL build and manage the disc reference without digging through setup controls.");
-        if (BuildConfig.WITH_GAME) button(overview, "Launch Mario Kart Wii", v -> launchGame());
+            "Launch the local PAL build after the disc data and private ARM64 runtime are ready.");
+        button(overview, "Launch Mario Kart Wii", v -> launchGame());
         addCard(page, overview);
+        LinearLayout runtime = card("Private ARM64 runtime",
+            "The runtime is generated from your own disc and stays on this device. The public APK contains no translated game code.");
+        runtimeStatus = label(runtime, RuntimePackManager.status(this), 15, Color.rgb(209, 250, 229));
+        button(runtime, "Import existing runtime pack", v -> {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE); intent.setType("application/zip");
+            intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
+                "application/zip", "application/octet-stream", "application/x-zip-compressed"});
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION); startActivityForResult(intent, PICK_RUNTIME_PACK);
+        });
+        addCard(page, runtime);
         LinearLayout disc = card("PAL disc reference",
             "Extract your own clean PAL RMCP01 image directly into app-private storage. Supports ISO, RVZ, WBFS, WIA, CISO, and GCZ.");
         discStatus = label(disc, getPreferences(MODE_PRIVATE).getString("discStatus", DiscExtractor.installedStatus(this)),
@@ -203,6 +215,19 @@ public final class MainActivity extends Activity {
     }
 
     private void launchGame() {
+        try {
+            String requested = AndroidModManager.runtimeLibrary(this);
+            if (!BuildConfig.WITH_GAME && !RuntimePackManager.canLaunch(this, requested)) {
+                new android.app.AlertDialog.Builder(this).setTitle("Private runtime required")
+                    .setMessage("This profile needs lib" + requested + ".so. Build it on this tablet or import a matching runtime pack first.")
+                    .setPositiveButton("Close", null).show();
+                return;
+            }
+        } catch (Exception error) {
+            new android.app.AlertDialog.Builder(this).setTitle("Cannot launch")
+                .setMessage(error.getMessage()).setPositiveButton("Close", null).show();
+            return;
+        }
         Intent game = new Intent(); game.setClassName(this, "org.wiicompiled.portlab.GameActivity"); startActivity(game);
     }
 
@@ -312,6 +337,15 @@ public final class MainActivity extends Activity {
                 } catch (Exception error) { message = "Mod import rejected: " + error.getMessage(); }
                 final String finished = message;
                 runOnUiThread(() -> { if (!stopped) refreshModsUi(finished); });
+            });
+        } else if (request == PICK_RUNTIME_PACK) {
+            runtimeStatus.setText("Importing and verifying private ARM64 runtime…");
+            worker.execute(() -> {
+                String message;
+                try { message = RuntimePackManager.importZip(this, uri); }
+                catch (Exception error) { message = "Runtime import rejected: " + error.getMessage(); }
+                final String finished = message;
+                runOnUiThread(() -> { if (!stopped) runtimeStatus.setText(finished); });
             });
         }
     }

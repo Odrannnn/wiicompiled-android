@@ -20,7 +20,7 @@ import java.nio.charset.StandardCharsets;
 import org.libsdl.app.SDLActivity;
 import org.libsdl.app.SDLSurface;
 
-/** Local game build only. Runs in a separate process to isolate runtime globals. */
+/** Runs a private, user-built runtime in a separate process to isolate runtime globals. */
 public final class GameActivity extends SDLActivity {
     private static final int PAD_LEFT=0x0001, PAD_RIGHT=0x0002, PAD_DOWN=0x0004, PAD_UP=0x0008;
     private static final int PAD_Z=0x0010, PAD_R=0x0020, PAD_L=0x0040;
@@ -28,12 +28,17 @@ public final class GameActivity extends SDLActivity {
     private int virtualButtons, virtualStickX, virtualStickY;
     private boolean virtualPadInstalled;
     private String runtimeLibrary = CodePatchRegistry.BASE_LIBRARY;
+    private RuntimePackManager.Pack runtimePack;
+    private File runtimeFile;
     private static native void nativeSetVirtualPadState(int buttons, int stickX, int stickY);
 
     @Override protected SDLSurface createSDLSurface(Context context) {
         return new AuroraSurface(context);
     }
-    @Override protected String[] getLibraries() { return new String[]{"c++_shared", runtimeLibrary}; }
+    @Override protected String[] getLibraries() { return new String[]{runtimeLibrary}; }
+    @Override protected String getMainSharedObject() {
+        return runtimeFile == null ? super.getMainSharedObject() : runtimeFile.getAbsolutePath();
+    }
     @Override protected void onCreate(Bundle state) {
         // SDLActivity loads libraries and starts native work in super.onCreate.
         // Prepare config before allowing that startup path to run.
@@ -43,9 +48,18 @@ public final class GameActivity extends SDLActivity {
             // libWiiCompiled reads config from global constructors. Seed native paths before
             // SDLActivity loads it; SDL's Android JNI context does not exist at that point.
             NativeProbe.configureAndroidPaths(getFilesDir().getAbsolutePath(), external.getAbsolutePath());
-            GpuDriverManager.prepareEnvironment(this);
             AndroidModManager.prepareEnvironment(this);
             runtimeLibrary = AndroidModManager.runtimeLibrary(this);
+            runtimePack = RuntimePackManager.active(this);
+            if (runtimePack != null) {
+                runtimeFile = RuntimePackManager.prepareForLaunch(this, runtimeLibrary);
+                GpuDriverManager.prepareEnvironment(this, runtimeFile.getParentFile().getAbsolutePath());
+            } else if (BuildConfig.WITH_GAME) {
+                // Compatibility path for old private developer APKs with embedded JNI libraries.
+                GpuDriverManager.prepareEnvironment(this);
+            } else {
+                throw new java.io.IOException("No private ARM64 runtime is installed. Build it on this tablet or import a runtime pack.");
+            }
             android.util.Log.i("WiiCompiled", "Selected translated runtime: " + runtimeLibrary);
             File game = new File(external, "game");
             File data = new File(game, "disc");
@@ -274,7 +288,12 @@ public final class GameActivity extends SDLActivity {
 
     @Override public void loadLibraries() {
         if (preparationError != null) throw new IllegalStateException(preparationError);
-        super.loadLibraries();
+        if (runtimePack == null) {
+            super.loadLibraries();
+            return;
+        }
+        try { RuntimePackManager.load(runtimePack, runtimeLibrary); }
+        catch (java.io.IOException error) { throw new IllegalStateException(error); }
     }
     @Override protected void onDestroy() {
         super.onDestroy();

@@ -90,12 +90,16 @@ final class GpuDriverManager {
     }
 
     static void prepareEnvironment(Context context) {
+        prepareEnvironment(context, context.getApplicationInfo().nativeLibraryDir);
+    }
+
+    static void prepareEnvironment(Context context, String runtimeLibraryDirectory) {
         Selection selection = load(context);
         String directory = selection == null ? null : selection.directory;
         String soname = selection == null ? null : selection.soname;
         String label = selection == null ? null : selection.label;
         NativeProbe.configureCustomVulkanDriver(directory, soname, label,
-            context.getApplicationInfo().nativeLibraryDir,
+            runtimeLibraryDirectory,
             new File(root(context), "tmp").getAbsolutePath(), context.getFilesDir().getAbsolutePath());
     }
 
