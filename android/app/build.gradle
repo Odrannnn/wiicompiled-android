@@ -1,0 +1,40 @@
+plugins { id 'com.android.application' }
+
+def withGame = project.hasProperty('withGame')
+
+android {
+    namespace 'org.wiicompiled.portlab'
+    compileSdk 36
+    ndkVersion '29.0.14206865'
+
+    buildFeatures { buildConfig true }
+    defaultConfig {
+        buildConfigField 'boolean', 'WITH_GAME', withGame.toString()
+        applicationId 'org.wiicompiled.portlab'
+        minSdk 30
+        targetSdk 36
+        versionCode 1
+        versionName '0.1.0-probe'
+        ndk { abiFilters 'arm64-v8a' }
+        externalNativeBuild {
+            cmake { arguments '-DANDROID_STL=c++_static' }
+        }
+    }
+    externalNativeBuild {
+        cmake { path file('src/main/cpp/CMakeLists.txt'); version '3.31.5' }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    if (withGame) {
+        sourceSets.debug.java.srcDirs += ["src/game/java", "../../private/android-runtime/_deps/sdl-src/android-project/app/src/main/java"]
+        sourceSets.debug.manifest.srcFile "src/game/AndroidManifest.xml"
+        sourceSets.debug.jniLibs.srcDirs += ["../../private/android-apk-libs"]
+        packaging.jniLibs.useLegacyPackaging = true
+    }
+    testOptions { unitTests.returnDefaultValues = true }
+}
+
+dependencies { testImplementation 'junit:junit:4.13.2' }
+

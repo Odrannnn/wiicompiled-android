@@ -1,0 +1,1314 @@
+diff --git a/aurora-main/cmake/AuroraDawnProvider.cmake b/aurora-main/cmake/AuroraDawnProvider.cmake
+index 002344b..7a4faef 100644
+--- a/aurora-main/cmake/AuroraDawnProvider.cmake
++++ b/aurora-main/cmake/AuroraDawnProvider.cmake
+@@ -206,8 +206,23 @@ elseif (_aurora_dawn_provider STREQUAL "package")
+   )
+     if (EXISTS "${_cmake_path}/DawnConfig.cmake")
+       set(CMAKE_FIND_PACKAGE_TARGETS_GLOBAL ON)
+-      find_package(Dawn REQUIRED CONFIG PATHS "${_cmake_path}" NO_DEFAULT_PATH)
++      find_package(Dawn REQUIRED CONFIG PATHS "${_cmake_path}" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+       set(CMAKE_FIND_PACKAGE_TARGETS_GLOBAL OFF)
++      if(ANDROID)
++        # The Android archive was built on Linux and exports that host's absolute
++        # NDK liblog path. Resolve only this system dependency against our NDK.
++        get_target_property(_dawn_links dawn::webgpu_dawn INTERFACE_LINK_LIBRARIES)
++        set(_dawn_relocated_links)
++        foreach(_link IN LISTS _dawn_links)
++          if(_link MATCHES "/liblog\\.so$")
++            list(APPEND _dawn_relocated_links log)
++          else()
++            list(APPEND _dawn_relocated_links "${_link}")
++          endif()
++        endforeach()
++        set_target_properties(dawn::webgpu_dawn PROPERTIES
++          INTERFACE_LINK_LIBRARIES "${_dawn_relocated_links}")
++      endif()
+       set(_dawn_cmake_found TRUE)
+       break()
+     endif ()
+@@ -253,3 +268,5 @@ if (NOT TARGET dawn::dawncpp_headers)
+   endif ()
+   add_library(dawn::dawncpp_headers ALIAS dawn_dawncpp_headers)
+ endif ()
++
++
+diff --git a/aurora-main/lib/dolphin/pad/pad.cpp b/aurora-main/lib/dolphin/pad/pad.cpp
+index ff8d4c6..dac33cb 100644
+--- a/aurora-main/lib/dolphin/pad/pad.cpp
++++ b/aurora-main/lib/dolphin/pad/pad.cpp
+@@ -9,6 +9,9 @@
+ #include <atomic>
+ #include <sys/stat.h>
+ #include <ranges>
++#if defined(SDL_PLATFORM_ANDROID)
++#include <jni.h>
++#endif
+ 
+ namespace {
+ constexpr int32_t k_mappingsFileVersion = 3;
+@@ -250,6 +253,13 @@ struct PADKeyboardState {
+ 
+ std::array<PADKeyboardState, PAD_MAX_CONTROLLERS> g_keyboardBindings;
+ 
++#if defined(SDL_PLATFORM_ANDROID)
++std::atomic_bool g_androidVirtualPadEnabled{false};
++std::atomic<uint16_t> g_androidVirtualPadButtons{0};
++std::atomic<int8_t> g_androidVirtualPadStickX{0};
++std::atomic<int8_t> g_androidVirtualPadStickY{0};
++#endif
++
+ struct PADCLampRegion {
+   uint8_t minTrigger;
+   uint8_t maxTrigger;
+@@ -670,7 +680,12 @@ u32 PADRead(PADStatus* status) {
+   for (uint32_t i = 0; i < PAD_CHANMAX; ++i) {
+     memset(&status[i], 0, sizeof(PADStatus));
+     auto controller = aurora::input::get_controller_for_player(i);
+-    if (controller == nullptr && !g_keyboardBindings[i].m_mappingsSet) {
++#if defined(SDL_PLATFORM_ANDROID)
++    const bool androidVirtualPad = i == 0 && g_androidVirtualPadEnabled.load(std::memory_order_acquire);
++#else
++    constexpr bool androidVirtualPad = false;
++#endif
++    if (controller == nullptr && !g_keyboardBindings[i].m_mappingsSet && !androidVirtualPad) {
+       status[i].err = PAD_ERR_NO_CONTROLLER;
+       g_suppressedButtons[i] = 0;
+       g_suppressLeftTrigger[i] = false;
+@@ -886,6 +901,15 @@ u32 PADRead(PADStatus* status) {
+       }
+     }
+ 
++#if defined(SDL_PLATFORM_ANDROID)
++    if (androidVirtualPad) {
++      status[i].err = PAD_ERR_NONE;
++      status[i].button |= g_androidVirtualPadButtons.load(std::memory_order_relaxed);
++      status[i].stickX = g_androidVirtualPadStickX.load(std::memory_order_relaxed);
++      status[i].stickY = g_androidVirtualPadStickY.load(std::memory_order_relaxed);
++    }
++#endif
++
+     if (inputBlocked) {
+       neutralize_status(status[i]);
+     } else {
+@@ -895,6 +919,19 @@ u32 PADRead(PADStatus* status) {
+   return rumbleSupport;
+ }
+ 
++#if defined(SDL_PLATFORM_ANDROID)
++extern "C" JNIEXPORT void JNICALL
++Java_org_wiicompiled_portlab_GameActivity_nativeSetVirtualPadState(
++    JNIEnv*, jclass, jint buttons, jint stickX, jint stickY) {
++  g_androidVirtualPadButtons.store(static_cast<uint16_t>(buttons), std::memory_order_relaxed);
++  g_androidVirtualPadStickX.store(static_cast<int8_t>(std::clamp(stickX, -127, 127)),
++                                  std::memory_order_relaxed);
++  g_androidVirtualPadStickY.store(static_cast<int8_t>(std::clamp(stickY, -127, 127)),
++                                  std::memory_order_relaxed);
++  g_androidVirtualPadEnabled.store(true, std::memory_order_release);
++}
++#endif
++
+ void PADControlMotor(const u32 chan, const u32 cmd) {
+   const auto controller = aurora::input::get_controller_for_player(chan);
+   const auto instance = aurora::input::get_instance_for_player(chan);
+diff --git a/aurora-main/lib/gfx/pipeline_cache.cpp b/aurora-main/lib/gfx/pipeline_cache.cpp
+index b0c94d4..82f660c 100644
+--- a/aurora-main/lib/gfx/pipeline_cache.cpp
++++ b/aurora-main/lib/gfx/pipeline_cache.cpp
+@@ -66,8 +66,19 @@ constexpr size_t MaxQueuedPipelineBuilds = 256;
+ // render and game threads, and cap large hosts to limit driver submissions and memory use.
+ constexpr size_t ReservedLogicalProcessors = 2;
+ constexpr size_t MaxPipelineWorkers = 22;
+-// Cached clear and GX pipelines are prewarmed using the full worker pool.
++// Android launches the guest while the persistent pipeline recipes are being
++// recreated. Letting all six workers on an eight-core tablet consume the
++// background queue competes directly with the SDL, render and Java UI threads;
++// a warm Retro Rewind cache can contain roughly a thousand pipelines, so this
++// showed up as a large but temporary FPS drop during the first menus. First-use
++// work is promoted to the priority queue and can still use every idle worker.
++// Keep background rebuilds deliberately narrow on Android and leave desktop
++// startup behavior unchanged.
++#if defined(__ANDROID__)
++constexpr size_t MaxBackgroundPipelineWorkers = 2;
++#else
+ constexpr size_t MaxBackgroundPipelineWorkers = MaxPipelineWorkers;
++#endif
+ // For synchronous pipeline fallback (OpenGL)
+ #ifdef NDEBUG
+ constexpr size_t BuildPipelinesPerFrame = 5;
+diff --git a/aurora-main/lib/window.cpp b/aurora-main/lib/window.cpp
+index 86649c9..2468b10 100644
+--- a/aurora-main/lib/window.cpp
++++ b/aurora-main/lib/window.cpp
+@@ -815,4 +815,9 @@ extern "C" JNIEXPORT void JNICALL Java_org_libsdl_app_SDLSurface_auroraNativeSet
+                                                                                              jboolean ready) {
+   aurora::window::set_surface_ready(ready == JNI_TRUE);
+ }
++
++extern "C" JNIEXPORT void JNICALL
++Java_org_wiicompiled_portlab_AuroraSurface_nativeSetSurfaceReady(JNIEnv*, jclass, jboolean ready) {
++  aurora::window::set_surface_ready(ready == JNI_TRUE);
++}
+ #endif
+diff --git a/runtime/CMakeLists.txt b/runtime/CMakeLists.txt
+index 642de5f..57a0cad 100644
+--- a/runtime/CMakeLists.txt
++++ b/runtime/CMakeLists.txt
+@@ -1,8 +1,8 @@
+-﻿cmake_minimum_required(VERSION 3.16)
++cmake_minimum_required(VERSION 3.16)
+ project(mkw_recompiled)
+ 
+-if((NOT (WIN32 AND MINGW)) AND (NOT CMAKE_SYSTEM_NAME STREQUAL "Linux"))
+-    message(FATAL_ERROR "WiiCompiled requires Windows (LLVM-MinGW) or native Linux")
++if((NOT (WIN32 AND MINGW)) AND (NOT CMAKE_SYSTEM_NAME STREQUAL "Linux") AND NOT ANDROID)
++    message(FATAL_ERROR "WiiCompiled requires Windows (LLVM-MinGW), Linux, or experimental Android ARM64")
+ endif()
+ if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR
+    NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR
+@@ -22,6 +22,14 @@ endif()
+ set(MKW_PROJECT_COMPILE_DEFINITIONS NOMINMAX)
+ 
+ set(CMAKE_CXX_STANDARD 17)
++if(ANDROID)
++    if(NOT ANDROID_ABI STREQUAL "arm64-v8a")
++        message(FATAL_ERROR "The experimental Android runtime targets arm64-v8a only")
++    endif()
++    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
++    set(AURORA_DAWN_PROVIDER package CACHE STRING "" FORCE)
++    set(AURORA_SDL3_LINKAGE static CACHE STRING "" FORCE)
++endif()
+ 
+ # Declared before the vendored libraries so the third-party block below can
+ # branch on it and so cmake/NativePrebuilt.cmake is included after the names it
+@@ -59,12 +67,7 @@ set_target_properties(mkw_pugixml PROPERTIES UNITY_BUILD OFF)
+ # (__amd64__/__i386__/__arm__/__aarch64__/etc.) only ever selects amd64.c for this project's
+ # x86_64-only target (see the platform/arch check above). Windows keeps using native Fibers
+ # untouched, so this target is never built there.
+-if(NOT WIN32)
+-    add_library(mkw_libco STATIC third_party/libco/libco.c)
+-    add_library(mkw::libco ALIAS mkw_libco)
+-    target_include_directories(mkw_libco PUBLIC third_party/libco)
+-    set_target_properties(mkw_libco PROPERTIES UNITY_BUILD OFF)
+-endif()
++include("${CMAKE_CURRENT_LIST_DIR}/cmake/GuestCoroutines.cmake")
+ 
+ # Runtime configuration is real TOML, parsed by toml11 rather than a project-
+ # specific line parser. Keep it header-only and vendored so disconnected release
+@@ -98,6 +101,11 @@ if(NOT MKW_NATIVE_PREBUILT_DIR)
+     target_compile_definitions(mkw_cryptopp PUBLIC ${MKW_CRYPTOPP_INTERFACE_DEFINITIONS})
+     target_compile_options(mkw_cryptopp PRIVATE -w)
+     set_target_properties(mkw_cryptopp PROPERTIES UNITY_BUILD OFF)
++    if(ANDROID)
++        target_sources(mkw_cryptopp PRIVATE "${ANDROID_NDK}/sources/android/cpufeatures/cpu-features.c")
++        target_include_directories(mkw_cryptopp PRIVATE "${ANDROID_NDK}/sources/android/cpufeatures")
++        target_compile_definitions(mkw_cryptopp PRIVATE CRYPTOPP_GETAUXV_AVAILABLE=1)
++    endif()
+ endif()
+ 
+ set(MKW_TRANSLATED_COMPILE_JOBS 0 CACHE STRING
+@@ -113,6 +121,16 @@ set(MKW_CPPWINRT_INCLUDE_DIR "" CACHE PATH "Optional self-contained C++/WinRT in
+ # as before.
+ set(MKW_AURORA_DIR "${CMAKE_CURRENT_LIST_DIR}/../aurora-main")
+ 
++if(ANDROID)
++    set(MKW_ADRENOTOOLS_DIR "${CMAKE_CURRENT_LIST_DIR}/../../libadrenotools" CACHE PATH
++        "libadrenotools source used for app-private Vulkan driver loading")
++    if(NOT EXISTS "${MKW_ADRENOTOOLS_DIR}/include/adrenotools/driver.h" OR
++       NOT EXISTS "${MKW_ADRENOTOOLS_DIR}/lib/linkernsbypass/CMakeLists.txt")
++        message(FATAL_ERROR "Android custom Vulkan drivers require initialized libadrenotools at ${MKW_ADRENOTOOLS_DIR}")
++    endif()
++    add_subdirectory("${MKW_ADRENOTOOLS_DIR}" "${CMAKE_BINARY_DIR}/adrenotools" EXCLUDE_FROM_ALL)
++endif()
++
+ # The translator's explicit float casts are PPC single-precision rounding points.
+ # Fast-math may erase them and change guest-visible integer conversions.
+ set(MKW_TRANSLATED_PPC_FP_OPTIONS -fno-fast-math -ffp-contract=off)
+@@ -257,3 +275,6 @@ message(STATUS
+ 
+ set(MKW_RUNTIME_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}")
+ include("${CMAKE_CURRENT_LIST_DIR}/cmake/PublicProducts.cmake")
++
++
++
+diff --git a/runtime/cmake/GuestCoroutines.cmake b/runtime/cmake/GuestCoroutines.cmake
+new file mode 100644
+index 0000000..7170c12
+--- /dev/null
++++ b/runtime/cmake/GuestCoroutines.cmake
+@@ -0,0 +1,15 @@
++# Shared by the desktop runtime and the standalone Android platform probe.
++if(NOT WIN32)
++    set(_mkw_libco_dir "${CMAKE_CURRENT_LIST_DIR}/../third_party/libco")
++    if(ANDROID AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
++        enable_language(ASM)
++        # Linked executable text, never mprotect() on a C array of opcodes.
++        add_library(mkw_libco STATIC
++            "${_mkw_libco_dir}/android.c" "${_mkw_libco_dir}/android_swap.S")
++    else()
++        add_library(mkw_libco STATIC "${_mkw_libco_dir}/libco.c")
++    endif()
++    add_library(mkw::libco ALIAS mkw_libco)
++    target_include_directories(mkw_libco PUBLIC "${_mkw_libco_dir}")
++    set_target_properties(mkw_libco PROPERTIES UNITY_BUILD OFF POSITION_INDEPENDENT_CODE ON)
++endif()
+diff --git a/runtime/cmake/PublicProducts.cmake b/runtime/cmake/PublicProducts.cmake
+index 1987cd5..4c3a34d 100644
+--- a/runtime/cmake/PublicProducts.cmake
++++ b/runtime/cmake/PublicProducts.cmake
+@@ -1,4 +1,4 @@
+-﻿# Public WiiCompiled product graph.
++# Public WiiCompiled product graph.
+ #
+ # The translator owns the translated build graph. Mario Kart's profile-neutral
+ # functions are compiled once into mkw_base_shared; only callers whose direct
+@@ -77,6 +77,9 @@ target_compile_definitions(mkw_runtime_common PRIVATE
+ target_link_libraries(mkw_runtime_common PRIVATE
+     aurora::gx aurora::pad aurora::si aurora::vi aurora::mtx)
+ target_link_libraries(mkw_runtime_common PRIVATE mkw::pugixml mkw::toml11 mkw::cryptopp)
++if(ANDROID)
++    target_link_libraries(mkw_runtime_common PRIVATE adrenotools log)
++endif()
+ if(WIN32)
+     target_link_libraries(mkw_runtime_common PRIVATE shell32 windowsapp)
+ else()
+@@ -277,7 +280,13 @@ function(mkw_configure_product target)
+         "$<TARGET_FILE_DIR:${target}>/initial_pipeline_cache.db")
+ endfunction()
+ 
+-add_executable(WiiCompiled "${MKW_BASE_PRODUCT_SOURCE}" ${MKW_BASE_REGISTRATION_SOURCES})
++if(ANDROID)
++    add_library(WiiCompiled SHARED "${MKW_BASE_PRODUCT_SOURCE}" ${MKW_BASE_REGISTRATION_SOURCES})
++    target_link_libraries(WiiCompiled PRIVATE adrenotools log)
++    target_link_options(WiiCompiled PRIVATE "-Wl,-z,max-page-size=16384" "-Wl,-z,defs")
++else()
++    add_executable(WiiCompiled "${MKW_BASE_PRODUCT_SOURCE}" ${MKW_BASE_REGISTRATION_SOURCES})
++endif()
+ mkw_configure_product(WiiCompiled)
+ target_precompile_headers(WiiCompiled PRIVATE
+     "${MKW_RUNTIME_SOURCE_DIR}/include/mkw_pch.h")
+@@ -286,7 +295,13 @@ if(TARGET mkw_base_sensitive)
+ endif()
+ 
+ if(MKW_HAVE_RETRO_REWIND)
+-    add_executable(RetroRewind "${MKW_RETRO_REWIND_PRODUCT_SOURCE}" ${MKW_RETRO_REGISTRATION_SOURCES})
++    if(ANDROID)
++        add_library(RetroRewind SHARED "${MKW_RETRO_REWIND_PRODUCT_SOURCE}" ${MKW_RETRO_REGISTRATION_SOURCES})
++        target_link_libraries(RetroRewind PRIVATE adrenotools log)
++        target_link_options(RetroRewind PRIVATE "-Wl,-z,max-page-size=16384" "-Wl,-z,defs")
++    else()
++        add_executable(RetroRewind "${MKW_RETRO_REWIND_PRODUCT_SOURCE}" ${MKW_RETRO_REGISTRATION_SOURCES})
++    endif()
+     mkw_configure_product(RetroRewind)
+     target_precompile_headers(RetroRewind REUSE_FROM WiiCompiled)
+     if(TARGET mkw_retro_sensitive)
+@@ -312,7 +327,11 @@ endif()
+ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64)$")
+     set(MKW_BASELINE_ARCH_FLAG -march=x86-64-v3)
+ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+-    set(MKW_BASELINE_ARCH_FLAG -mcpu=native)
++    if(CMAKE_CROSSCOMPILING)
++        set(MKW_BASELINE_ARCH_FLAG -march=armv8-a)
++    else()
++        set(MKW_BASELINE_ARCH_FLAG -mcpu=native)
++    endif()
+ else()
+     set(MKW_BASELINE_ARCH_FLAG "")
+ endif()
+@@ -325,3 +344,4 @@ foreach(target IN LISTS MKW_ALL_BUILD_TARGETS)
+         target_compile_options(${target} PRIVATE ${MKW_BASELINE_ARCH_FLAG})
+     endif()
+ endforeach()
++
+diff --git a/runtime/include/hle/riivolution_contract.h b/runtime/include/hle/riivolution_contract.h
+index 3839cbf..69f7312 100644
+--- a/runtime/include/hle/riivolution_contract.h
++++ b/runtime/include/hle/riivolution_contract.h
+@@ -7,8 +7,8 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ //
+ // Deviations from Dolphin, all deliberate:
+-//  - <memory> patches are parsed but never applied here: guest code patching
+-//    belongs to the translator's Code.pul/lowmem pipeline, not the runtime.
++//  - original-guarded and valuefile <memory> patches are represented by the translated
++//    product; selected direct low-memory data writes are applied by the runtime loader.
+ //  - Riivolution "macros" are not supported
+ 
+ #pragma once
+@@ -222,8 +222,8 @@ struct Savegame {
+     bool clone = true;
+ };
+ 
+-// Parsed for completeness; the runtime never applies these (guest code and
+-// lowmem patching is the translator pipeline's job).
++// Original-guarded branches and valuefile uploads are handled by the translated
++// product. Selected direct low-memory values are applied before guest entry.
+ struct MemoryPatch {
+     uint32_t offset = 0;
+     std::string value;
+diff --git a/runtime/include/host_fault_access.h b/runtime/include/host_fault_access.h
+new file mode 100644
+index 0000000..952b8e3
+--- /dev/null
++++ b/runtime/include/host_fault_access.h
+@@ -0,0 +1,32 @@
++#pragma once
++#include <cstddef>
++#include <cstdint>
++#include <cstring>
++
++namespace HostFault {
++enum class Access { Unknown, Read, Write };
++
++// Linux/Android arm64 signal frames store tagged records in sigcontext.__reserved.
++// ESR is required to distinguish a store from a read; an absent/malformed record
++// must not silently become a read and bypass the guest executable-write guard.
++inline Access DecodeAarch64Context(const void* records, size_t length) noexcept {
++    const auto* cursor = static_cast<const unsigned char*>(records);
++    if (!cursor) return Access::Unknown;
++    while (length >= 8) {
++        uint32_t magic, size;
++        std::memcpy(&magic, cursor, 4);
++        std::memcpy(&size, cursor + 4, 4);
++        if (!magic || size < 16 || size % 16 || size > length) return Access::Unknown;
++        if (magic == 0x45535201u) { // ESR_MAGIC, struct esr_context
++            uint64_t esr;
++            std::memcpy(&esr, cursor + 8, 8);
++            const auto exceptionClass = (esr >> 26) & 0x3fu;
++            if (exceptionClass != 0x24 && exceptionClass != 0x25) return Access::Unknown;
++            return (esr & (1u << 6)) ? Access::Write : Access::Read;
++        }
++        cursor += size;
++        length -= size;
++    }
++    return Access::Unknown;
++}
++}
+diff --git a/runtime/include/runtime_config.h b/runtime/include/runtime_config.h
+index c7a93c4..f7c90ed 100644
+--- a/runtime/include/runtime_config.h
++++ b/runtime/include/runtime_config.h
+@@ -159,7 +159,12 @@ inline bool IsSupportedFrameInterpolationFps(uint32_t value) {
+ }
+ 
+ inline std::optional<std::filesystem::path> ExecutableDirectory() {
+-#ifdef _WIN32
++#if defined(__ANDROID__)
++    // /proc/self/exe is app_process64 on Android, not our APK or game directory.
++    const char* external = std::getenv("MKW_ANDROID_EXTERNAL_STORAGE");
++    if (!external || !*external) return std::nullopt;
++    return std::filesystem::path(external) / "game";
++#elif defined(_WIN32)
+     std::wstring buffer(MAX_PATH, L'\0');
+     for (;;) {
+         const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+@@ -219,6 +224,13 @@ inline const std::optional<std::filesystem::path>& PortableRootDirectory() {
+ }
+ 
+ inline std::filesystem::path ApplicationDataDirectory() {
++#if defined(__ANDROID__)
++    // The Activity seeds these before loading this library. SDL's JNI context is not ready
++    // while global constructors run, so no SDL Android storage function is safe here.
++    const char* internal = std::getenv("MKW_ANDROID_INTERNAL_STORAGE");
++    if (!internal || !*internal) throw std::runtime_error("Android internal storage is unavailable");
++    return std::filesystem::path(internal) / kApplicationDirectoryName;
++#endif
+     if (const auto& portableRoot = PortableRootDirectory()) {
+         return *portableRoot / kPortableUserDataDirectoryName;
+     }
+@@ -909,3 +921,4 @@ inline void LogLoadedConfig() {
+ }
+ 
+ } // namespace RuntimeConfigFile
++
+diff --git a/runtime/src/android_entry.cpp b/runtime/src/android_entry.cpp
+new file mode 100644
+index 0000000..2499abd
+--- /dev/null
++++ b/runtime/src/android_entry.cpp
+@@ -0,0 +1,29 @@
++#if defined(__ANDROID__)
++#include <unistd.h>
++#include <cstdlib>
++#include <cstdio>
++#include <filesystem>
++#include <string>
++#include "runtime_config.h"
++extern int main(int argc, char** argv);
++
++// SDLActivity initializes Android/JNI and invokes SDL_main on SDL's native thread.
++// This library is linked into a locally built APK; no downloaded executable is run.
++extern "C" __attribute__((visibility("default"))) int SDL_main(int argc, char** argv) {
++    if (sysconf(_SC_PAGESIZE) != 4096) {
++        std::fputs("Android runtime currently requires 4 KiB host pages.\n", stderr);
++        return 1;
++    }
++    const char* external = std::getenv("MKW_ANDROID_EXTERNAL_STORAGE");
++    if (!external || !*external) return 1;
++    if (const char* overlays = std::getenv("MKW_ANDROID_OVERLAY_ROOTS"); overlays && *overlays) {
++        RuntimeConfigFile::AppendOverlayRoots(RuntimeConfigFile::Mutable(), std::string(overlays));
++    }
++    const auto root = std::filesystem::path(external) / "game";
++    if (chdir(root.c_str()) != 0) {
++        std::fputs("Missing Android game directory; prepare the local disc data first.\n", stderr);
++        return 1;
++    }
++    return main(argc, argv);
++}
++#endif
+diff --git a/runtime/src/android_vulkan_loader.cpp b/runtime/src/android_vulkan_loader.cpp
+new file mode 100644
+index 0000000..01c23c5
+--- /dev/null
++++ b/runtime/src/android_vulkan_loader.cpp
+@@ -0,0 +1,161 @@
++#if defined(__ANDROID__)
++
++#include <adrenotools/driver.h>
++#include <android/log.h>
++#include <dlfcn.h>
++#include <cstdlib>
++#include <fstream>
++#include <span>
++#include <string>
++#include <utility>
++
++// Dawn's packaged Android archive loads libvulkan through this small class.  Providing the
++// complete implementation in the application makes the archive leave its own DynamicLib.o
++// unextracted, which gives Android builds one controlled hook without forking the rest of Dawn.
++// The class layout and signatures match Dawn commit 13abc3bc8ea2d3c2050f9e77a12d012108ceee24.
++namespace dawn {
++class DynamicLib {
++  public:
++    DynamicLib() = default;
++    ~DynamicLib();
++    DynamicLib(const DynamicLib&) = delete;
++    DynamicLib& operator=(const DynamicLib&) = delete;
++    DynamicLib(DynamicLib&& other);
++    DynamicLib& operator=(DynamicLib&& other);
++    bool Valid() const;
++    bool Open(const std::string& filename, std::string* error = nullptr);
++    bool Open(const std::string& filename, std::span<const std::string> searchPaths,
++              std::string* error = nullptr);
++    bool OpenLoaded(const std::string& filename, std::string* error = nullptr);
++    void Close();
++    void* GetProc(const std::string& procName, std::string* error = nullptr) const;
++
++  private:
++    void* mHandle = nullptr;
++    bool mNeedsClose = false;
++};
++
++namespace {
++constexpr const char* kTag = "WiiCompiledGpuDriver";
++
++const char* Env(const char* name) {
++    const char* value = std::getenv(name);
++    return value && *value ? value : nullptr;
++}
++
++void WriteStatus(const std::string& text) {
++    __android_log_print(ANDROID_LOG_INFO, kTag, "%s", text.c_str());
++    const char* files = Env("MKW_ANDROID_FILES_DIR");
++    if (!files) return;
++    std::ofstream output(std::string(files) + "/gpu-driver-runtime-status.txt",
++                         std::ios::binary | std::ios::trunc);
++    output << text << '\n';
++}
++
++void* OpenCustomVulkan(std::string* error) {
++    const char* driverDir = Env("MKW_VULKAN_DRIVER_DIR");
++    const char* soname = Env("MKW_VULKAN_DRIVER_SONAME");
++    if (!driverDir || !soname) return nullptr;
++    const char* hookDir = Env("MKW_ANDROID_NATIVE_LIBRARY_DIR");
++    const char* tmpDir = Env("MKW_VULKAN_DRIVER_TMP");
++    if (!hookDir || !tmpDir) {
++        if (error) *error = "custom driver environment is incomplete";
++        return nullptr;
++    }
++    std::string normalizedDir(driverDir);
++    if (normalizedDir.back() != '/') normalizedDir.push_back('/');
++    dlerror();
++    void* handle = adrenotools_open_libvulkan(RTLD_NOW | RTLD_LOCAL,
++        ADRENOTOOLS_DRIVER_CUSTOM, tmpDir, hookDir, normalizedDir.c_str(), soname, nullptr, nullptr);
++    if (!handle && error) {
++        const char* detail = dlerror();
++        *error = detail ? detail : "adrenotools_open_libvulkan returned null";
++    }
++    return handle;
++}
++}  // namespace
++
++DynamicLib::~DynamicLib() { Close(); }
++DynamicLib::DynamicLib(DynamicLib&& other) {
++    std::swap(mHandle, other.mHandle);
++    mNeedsClose = other.mNeedsClose;
++}
++DynamicLib& DynamicLib::operator=(DynamicLib&& other) {
++    std::swap(mHandle, other.mHandle);
++    mNeedsClose = other.mNeedsClose;
++    return *this;
++}
++bool DynamicLib::Valid() const { return mHandle != nullptr; }
++
++bool DynamicLib::Open(const std::string& filename, std::string* error) {
++    if (mHandle) {
++        if (error) *error = "DynamicLib is already open";
++        return false;
++    }
++    const bool selectedVulkan = filename == "libvulkan.so" && Env("MKW_VULKAN_DRIVER_DIR");
++    std::string customError;
++    if (selectedVulkan) {
++        mHandle = OpenCustomVulkan(&customError);
++        if (mHandle) {
++            const char* label = Env("MKW_VULKAN_DRIVER_LABEL");
++            WriteStatus(std::string("Custom driver loaded: ") +
++                        (label ? label : Env("MKW_VULKAN_DRIVER_SONAME")));
++        }
++    }
++    if (!mHandle) {
++        dlerror();
++        mHandle = dlopen(filename.c_str(), RTLD_NOW);
++        if (mHandle && filename == "libvulkan.so") {
++            WriteStatus(selectedVulkan
++                ? "Custom driver failed; using system Vulkan driver. " + customError
++                : "System Vulkan driver loaded.");
++        }
++    }
++    if (!mHandle && error) {
++        const char* detail = dlerror();
++        *error = detail ? detail : "dlopen failed";
++    }
++    mNeedsClose = mHandle != nullptr;
++    return mNeedsClose;
++}
++
++bool DynamicLib::OpenLoaded(const std::string& filename, std::string* error) {
++    if (mHandle) {
++        if (error) *error = "DynamicLib is already open";
++        return false;
++    }
++    dlerror();
++    mHandle = dlopen(filename.c_str(), RTLD_NOW | RTLD_NOLOAD);
++    if (!mHandle && error) {
++        const char* detail = dlerror();
++        *error = detail ? detail : "library is not loaded";
++    }
++    mNeedsClose = false;
++    return mHandle != nullptr;
++}
++
++bool DynamicLib::Open(const std::string& filename, std::span<const std::string> searchPaths,
++                      std::string* error) {
++    for (const std::string& path : searchPaths) if (Open(path + filename, error)) return true;
++    return false;
++}
++
++void DynamicLib::Close() {
++    if (!mHandle) return;
++    if (mNeedsClose) dlclose(mHandle);
++    mNeedsClose = false;
++    mHandle = nullptr;
++}
++
++void* DynamicLib::GetProc(const std::string& procName, std::string* error) const {
++    dlerror();
++    void* proc = dlsym(mHandle, procName.c_str());
++    if (!proc && error) {
++        const char* detail = dlerror();
++        *error = detail ? detail : "dlsym failed";
++    }
++    return proc;
++}
++}  // namespace dawn
++
++#endif
+diff --git a/runtime/src/hle/audio/audio.cpp b/runtime/src/hle/audio/audio.cpp
+index 1be5008..8a3a3f9 100644
+--- a/runtime/src/hle/audio/audio.cpp
++++ b/runtime/src/hle/audio/audio.cpp
+@@ -509,7 +509,7 @@ int64_t ConsumeAudioPollDeltaMicros()
+     // kMaxBlocksPerTick per pass. Never return early on a zero delta: two scheduler passes
+     // can land in the same microsecond and the backlog still needs servicing.
+     constexpr int64_t kMaxPollDeltaMicros = 100'000;
+-    return std::min(elapsed, kMaxPollDeltaMicros);
++    return std::min<int64_t>(elapsed, kMaxPollDeltaMicros);
+ }
+ 
+ } // namespace
+@@ -539,3 +539,4 @@ void Audio_HLE_PollDeferred()
+     }
+     OS_HLE_EndDeferredGuestCallbacks();
+ }
++
+diff --git a/runtime/src/hle/net/network_config.cpp b/runtime/src/hle/net/network_config.cpp
+index 78802c0..ed2ddfb 100644
+--- a/runtime/src/hle/net/network_config.cpp
++++ b/runtime/src/hle/net/network_config.cpp
+@@ -89,15 +89,6 @@ static void WriteNcdConfig(uint32_t addr, uint32_t len) {
+     }
+ }
+ 
+-enum class KdTrySuspendPhase {
+-    Boot,
+-    PostResumeProbe,
+-    Ready,
+-};
+-
+-static KdTrySuspendPhase g_kdTrySuspendPhase = KdTrySuspendPhase::Boot;
+-static bool g_kdBootProbeSeen = false;
+-
+ // /dev/net/kd/time state, mirroring Dolphin's NetKDTimeDevice. Any negative
+ // result here turns into NWC24's generic -42 ("Failed to synchronize time"),
+ // and DWC's auth stack also reads universal time through this device.
+@@ -163,12 +154,6 @@ int32_t HandleKdIoctl(uint32_t cmd, uint32_t inBuf, uint32_t inLen, uint32_t out
+         WriteReturn(outBuf, outLen, 0);
+         return 0;
+     case 0x03: // resume scheduler
+-        // MKW performs a suspend/user-ID/resume initialization cycle after its
+-        // first boot-time try-suspend probe. The next probe still observes the
+-        // scheduler transition as pending; later requests are operational.
+-        if (g_kdBootProbeSeen && g_kdTrySuspendPhase == KdTrySuspendPhase::Boot) {
+-            g_kdTrySuspendPhase = KdTrySuspendPhase::PostResumeProbe;
+-        }
+         WriteReturn(outBuf, outLen, 0);
+         return 0;
+     case 0x04: // time triggers
+@@ -187,19 +172,10 @@ int32_t HandleKdIoctl(uint32_t cmd, uint32_t inBuf, uint32_t inLen, uint32_t out
+         WriteReturn(outBuf, outLen, 0);
+         return 0;
+     case 0x02: // try suspend scheduler
+-        // Our synchronous IOS bridge reuses the reply buffer, so acknowledging
+-        // this like Dolphin does (unchanged output) leaks cmd 3's zero result
+-        // into MKW's post-resume probe and makes the SDK panic. Preserve the
+-        // two pending startup probes, then report success once ready.
+-        if (g_kdTrySuspendPhase == KdTrySuspendPhase::Boot) {
+-            g_kdBootProbeSeen = true;
+-            WriteReturn(outBuf, outLen, -42);
+-        } else if (g_kdTrySuspendPhase == KdTrySuspendPhase::PostResumeProbe) {
+-            WriteReturn(outBuf, outLen, -42);
+-            g_kdTrySuspendPhase = KdTrySuspendPhase::Ready;
+-        } else {
+-            WriteReturn(outBuf, outLen, 0);
+-        }
++        // This runtime handles the request synchronously, so the scheduler is
++        // already suspended when the reply arrives. Report the WC24 result in
++        // the output word as well as returning IPC success.
++        WriteReturn(outBuf, outLen, 0);
+         return 0;
+     case 0x06: // startup socket
+         if (outBuf && outLen) {
+diff --git a/runtime/src/hle/net/network_core.cpp b/runtime/src/hle/net/network_core.cpp
+index dacbbe3..be47d88 100644
+--- a/runtime/src/hle/net/network_core.cpp
++++ b/runtime/src/hle/net/network_core.cpp
+@@ -648,6 +648,17 @@ extern "C" int32_t Network_HLE_OpenDevice(const char* path, uint32_t mode) {
+     if (!path) {
+         return -101;
+     }
++
++    // WC24's KD request and time nodes are local IOS services. Games use them
++    // for scheduler and clock setup even when online play is disabled, so they
++    // must not be gated by the external-networking preference.
++    if (std::strcmp(path, "/dev/net/kd/request") == 0) {
++        return AllocateDevice(DeviceKind::KdRequest);
++    }
++    if (std::strcmp(path, "/dev/net/kd/time") == 0) {
++        return AllocateDevice(DeviceKind::KdTime);
++    }
++
+     if (!RuntimeConfigFile::NetworkEnabled(true)) {
+         // The guest opens several /dev/net nodes at boot and retries; report the
+         // reason online will not work exactly once.
+@@ -659,11 +670,7 @@ extern "C" int32_t Network_HLE_OpenDevice(const char* path, uint32_t mode) {
+         return 0;
+     }
+     DeviceKind kind;
+-    if (std::strcmp(path, "/dev/net/kd/request") == 0) {
+-        kind = DeviceKind::KdRequest;
+-    } else if (std::strcmp(path, "/dev/net/kd/time") == 0) {
+-        kind = DeviceKind::KdTime;
+-    } else if (std::strcmp(path, "/dev/net/ncd/manage") == 0) {
++    if (std::strcmp(path, "/dev/net/ncd/manage") == 0) {
+         kind = DeviceKind::NcdManage;
+     } else if (std::strcmp(path, "/dev/net/ip/top") == 0) {
+         kind = DeviceKind::IpTop;
+diff --git a/runtime/src/hle/storage/nand_api.cpp b/runtime/src/hle/storage/nand_api.cpp
+index 723569c..7451cbb 100644
+--- a/runtime/src/hle/storage/nand_api.cpp
++++ b/runtime/src/hle/storage/nand_api.cpp
+@@ -153,11 +153,13 @@ extern "C" int32_t NANDOpen_HLE(uint32_t pathPtr, uint32_t fileInfoPtr, uint32_t
+     }
+ 
+     if (!file) {
+-        if (IsFaceLibResourcePath(path) && SeedFaceLibResource(hostPath)) {
++        if ((IsFaceLibResourcePath(path) && SeedFaceLibResource(hostPath)) ||
++            (IsFaceLibDatabasePath(path) && SeedFaceLibDatabase(hostPath))) {
+             file = NandFopen(hostPath, fopenMode);
+         }
+         if (!file) {
+-            LogNandError("NANDOpen", "FAILED to open");
++            LogNandError("NANDOpen", "FAILED to open '%s' (guest='%s', mode=%u)",
++                         HostPathText(hostPath).c_str(), path, mode);
+             return NAND_RESULT_NOEXISTS;
+         }
+     }
+@@ -293,6 +295,8 @@ extern "C" int32_t NANDCreate_HLE(uint32_t pathPtr, uint32_t perm, uint32_t attr
+     // Create empty file
+     FILE* f = NandFopen(hostPath, "wb");
+     if (!f) {
++        LogNandError("NANDCreate", "FAILED to create '%s' (guest='%s')",
++                     HostPathText(hostPath).c_str(), path);
+         return NAND_RESULT_UNKNOWN;
+     }
+     std::fclose(f);
+@@ -310,6 +314,7 @@ extern "C" int32_t NANDDelete_HLE(uint32_t pathPtr) {
+     const std::filesystem::path hostPath = TranslateNandPath(path);
+ 
+     if (!PathExists(hostPath)) {
++        LogNandWarning("NANDDelete", "'%s' does not exist", HostPathText(hostPath).c_str());
+         return NAND_RESULT_NOEXISTS;
+     }
+     
+@@ -394,6 +399,7 @@ extern "C" int32_t NANDGetStatus_HLE(uint32_t pathPtr, uint32_t outStatusPtr) {
+     const std::filesystem::path hostPath = TranslateNandPath(path);
+ 
+     if (!PathExists(hostPath)) {
++        LogNandWarning("NANDGetStatus", "'%s' does not exist", HostPathText(hostPath).c_str());
+         return NAND_RESULT_NOEXISTS;
+     }
+     
+@@ -415,6 +421,7 @@ extern "C" int32_t NANDGetType_HLE(uint32_t pathPtr, uint32_t outTypePtr) {
+     const std::filesystem::path hostPath = TranslateNandPath(path);
+     
+     if (!PathExists(hostPath)) {
++        LogNandWarning("NANDGetType", "'%s' does not exist", HostPathText(hostPath).c_str());
+         return NAND_RESULT_NOEXISTS;
+     }
+     
+diff --git a/runtime/src/hle/storage/nand_async.cpp b/runtime/src/hle/storage/nand_async.cpp
+index ae9f3d9..7e9e39b 100644
+--- a/runtime/src/hle/storage/nand_async.cpp
++++ b/runtime/src/hle/storage/nand_async.cpp
+@@ -104,21 +104,23 @@ bool NandProcessPendingCallbacks(CpuContext* cpu, int maxToProcess) {
+ // reference them directly. PPC_NATIVE_OVERRIDE calls stay written out verbatim, not macro-generated,
+ // because the C# translator regex-scans this file as raw text to decide which addresses to leave untranslated.
+ 
+-// Returns the synchronous result verbatim.
++// The immediate return reports whether the async request was accepted. The completed
++// operation result is delivered through the callback, including NOEXISTS so first-run
++// clients can create missing files. Returning that result here as well makes SDK code
++// abort before its completion callback runs.
+ #define NAND_ASYNC_FWD_BODY(Name, Sync, params, sync_args)        \
+     extern "C" int32_t Name params {                              \
+         int32_t result = Sync sync_args;                          \
+         InvokeNandCallback(callbackPtr, result, commandBlockPtr); \
+-        return result;                                            \
++        return NAND_RESULT_OK;                                    \
+     }
+ 
+-// Reports only success or failure: the transferred count travels to the guest
+-// through the callback, so a non-negative result collapses to NAND_RESULT_OK.
++// Transferred byte counts and errors both travel through the callback.
+ #define NAND_ASYNC_FWD_BODY_OKZERO(Name, Sync, params, sync_args) \
+     extern "C" int32_t Name params {                              \
+         int32_t result = Sync sync_args;                          \
+         InvokeNandCallback(callbackPtr, result, commandBlockPtr); \
+-        return (result < 0) ? result : NAND_RESULT_OK;            \
++        return NAND_RESULT_OK;                                    \
+     }
+ 
+ NAND_ASYNC_FWD_BODY(NANDOpenAsync_HLE, NANDOpen_HLE,
+@@ -186,6 +188,15 @@ PPC_NATIVE_OVERRIDE(8019D104, NANDPrivateSafeOpenAsync_HLE, int32_t,
+      uint32_t callbackPtr, uint32_t commandBlockPtr),
+     (pathPtr, fileInfoPtr, mode, tempBufferPtr, tempBufferSize, callbackPtr, commandBlockPtr));
+ 
++NAND_ASYNC_FWD_BODY(NANDSafeOpenAsync_HLE, NANDSafeOpen_HLE,
++    (uint32_t pathPtr, uint32_t fileInfoPtr, uint32_t mode, uint32_t tempBufferPtr, uint32_t tempBufferSize,
++     uint32_t callbackPtr, uint32_t commandBlockPtr),
++    (pathPtr, fileInfoPtr, mode, tempBufferPtr, tempBufferSize))
++PPC_NATIVE_OVERRIDE(8019D130, NANDSafeOpenAsync_HLE, int32_t,
++    (uint32_t pathPtr, uint32_t fileInfoPtr, uint32_t mode, uint32_t tempBufferPtr, uint32_t tempBufferSize,
++     uint32_t callbackPtr, uint32_t commandBlockPtr),
++    (pathPtr, fileInfoPtr, mode, tempBufferPtr, tempBufferSize, callbackPtr, commandBlockPtr));
++
+ NAND_ASYNC_FWD_BODY(NANDSafeCloseAsync_HLE, NANDSafeClose_HLE,
+     (uint32_t fileInfoPtr, uint32_t callbackPtr, uint32_t commandBlockPtr),
+     (fileInfoPtr))
+@@ -412,7 +423,8 @@ extern "C" int32_t NANDSafeOpen_HLE(uint32_t pathPtr, uint32_t fileInfoPtr, uint
+         // Read-only safe open reads the original in place; the library builds no scratch
+         // copy for this case.
+         FILE* file = NandFopen(hostPath, "rb");
+-        if (!file && IsFaceLibResourcePath(path) && SeedFaceLibResource(hostPath)) {
++        if (!file && ((IsFaceLibResourcePath(path) && SeedFaceLibResource(hostPath)) ||
++                      (IsFaceLibDatabasePath(path) && SeedFaceLibDatabase(hostPath)))) {
+             file = NandFopen(hostPath, "rb");
+         }
+         if (!file) {
+diff --git a/runtime/src/hle/storage/nand_fs.cpp b/runtime/src/hle/storage/nand_fs.cpp
+index 5b35e16..170b9a2 100644
+--- a/runtime/src/hle/storage/nand_fs.cpp
++++ b/runtime/src/hle/storage/nand_fs.cpp
+@@ -411,6 +411,79 @@ bool IsFaceLibResourcePath(const char* path) {
+     return std::strcmp(path, "/shared2/menu/FaceLib/RFL_Res.dat") == 0;
+ }
+ 
++// A newly formatted Wii Mii database consists of a 0x1f1e0-byte header followed
++// by 10,000 empty 74-byte hidden-Mii records. The final format write is rounded
++// to 32 bytes, leaving 12 harmless trailing bytes in the file. These constants
++// and the checksum routine follow the open-source RVLFaceLib implementation.
++// Generating this empty database avoids requiring or copying console-owned Mii
++// data while giving games the same state as a Wii whose Mii database was reset.
++bool SeedFaceLibDatabase(const std::filesystem::path& hostPath) {
++    constexpr size_t kHeaderSize = 0x1f1e0;
++    constexpr size_t kDatabaseSize = 0xd3c8c;
++    constexpr size_t kIsolationOffset = 0x1cec;
++    constexpr size_t kHiddenHeaderOffset = 0x1d00;
++    constexpr size_t kFormatTableOffset = kHiddenHeaderOffset + 8;
++    constexpr size_t kFormatTableSize = 12;
++    constexpr size_t kFormatTableCount = 10000;
++    constexpr size_t kCrcOffset = kHeaderSize - 2;
++
++    std::vector<uint8_t> database(kDatabaseSize, 0);
++    auto writeBe16 = [&](size_t offset, uint16_t value) {
++        database[offset] = static_cast<uint8_t>(value >> 8);
++        database[offset + 1] = static_cast<uint8_t>(value);
++    };
++    auto writeBe32 = [&](size_t offset, uint32_t value) {
++        database[offset] = static_cast<uint8_t>(value >> 24);
++        database[offset + 1] = static_cast<uint8_t>(value >> 16);
++        database[offset + 2] = static_cast<uint8_t>(value >> 8);
++        database[offset + 3] = static_cast<uint8_t>(value);
++    };
++
++    writeBe32(0, 0x524e4f44);                    // RNOD
++    writeBe32(kIsolationOffset, 0x80000000);     // isolation = TRUE on PPC
++    writeBe32(kHiddenHeaderOffset, 0x524e4844);  // RNHD
++    writeBe16(kHiddenHeaderOffset + 4, 0xffff);  // empty list head
++    writeBe16(kHiddenHeaderOffset + 6, 0xffff);  // empty list tail
++    for (size_t i = 0; i < kFormatTableCount; ++i) {
++        const size_t entry = kFormatTableOffset + i * kFormatTableSize;
++        // PPC bitfields put the one-bit sex/padding fields first, leaving the
++        // signed 15-bit next/previous links as 0x7fff for -1.
++        writeBe16(entry + 8, 0x7fff);
++        writeBe16(entry + 10, 0x7fff);
++    }
++
++    uint16_t crc = 0;
++    for (size_t offset = 0; offset < kHeaderSize; ++offset) {
++        uint8_t value = database[offset];
++        for (int bit = 0; bit < 8; ++bit) {
++            crc = static_cast<uint16_t>((crc << 1) ^ ((crc & 0x8000) ? 0x1021 : 0));
++            if (value & 0x80) {
++                crc ^= 1;
++            }
++            value <<= 1;
++        }
++    }
++    writeBe16(kCrcOffset, crc);
++
++    CreateParentDirectories(hostPath);
++    std::ofstream out(hostPath, std::ios::binary);
++    if (!out) {
++        LogNandError("FaceLibSeed", "Failed to create %s", HostPathText(hostPath).c_str());
++        return false;
++    }
++    out.write(reinterpret_cast<const char*>(database.data()), static_cast<std::streamsize>(database.size()));
++    if (!out) {
++        LogNandError("FaceLibSeed", "Failed to write %s", HostPathText(hostPath).c_str());
++        return false;
++    }
++
++    return true;
++}
++
++bool IsFaceLibDatabasePath(const char* path) {
++    return std::strcmp(path, "/shared2/menu/FaceLib/RFL_DB.dat") == 0;
++}
++
+ // Create directories recursively
+ bool CreateDirectoryPath(const std::filesystem::path& path) {
+     if (path.empty()) {
+diff --git a/runtime/src/hle/storage/nand_internal.h b/runtime/src/hle/storage/nand_internal.h
+index f45c617..7ffd9e4 100644
+--- a/runtime/src/hle/storage/nand_internal.h
++++ b/runtime/src/hle/storage/nand_internal.h
+@@ -106,6 +106,8 @@ bool NandRename(const std::filesystem::path& from, const std::filesystem::path&
+ 
+ bool SeedFaceLibResource(const std::filesystem::path& hostPath);
+ bool IsFaceLibResourcePath(const char* path);
++bool SeedFaceLibDatabase(const std::filesystem::path& hostPath);
++bool IsFaceLibDatabasePath(const char* path);
+ 
+ // ============================================================================
+ // stdio helpers shared by the NAND* library and the IOS_* device layer
+diff --git a/runtime/src/hle/storage/nand_isfs.cpp b/runtime/src/hle/storage/nand_isfs.cpp
+index 6ea0ad4..e8c20b6 100644
+--- a/runtime/src/hle/storage/nand_isfs.cpp
++++ b/runtime/src/hle/storage/nand_isfs.cpp
+@@ -394,8 +394,12 @@ extern "C" int32_t NAND_IOS_Open_HLE(uint32_t pathPtr, uint32_t mode) {
+     
+     // Seed FaceLib resources before the existence check so every open mode can
+     // still find them on a fresh managed NAND.
+-    if (!PathExists(hostPath) && IsFaceLibResourcePath(path)) {
+-        SeedFaceLibResource(hostPath);
++    if (!PathExists(hostPath)) {
++        if (IsFaceLibResourcePath(path)) {
++            SeedFaceLibResource(hostPath);
++        } else if (IsFaceLibDatabasePath(path)) {
++            SeedFaceLibDatabase(hostPath);
++        }
+     }
+ 
+     // Determine file mode. IOS never creates files on open - creation happens
+diff --git a/runtime/src/hle/storage/riivolution.cpp b/runtime/src/hle/storage/riivolution.cpp
+index 7fddf83..f0f8116 100644
+--- a/runtime/src/hle/storage/riivolution.cpp
++++ b/runtime/src/hle/storage/riivolution.cpp
+@@ -31,6 +31,7 @@ namespace {
+ struct RiivoState {
+     std::vector<RuntimeRiivolution::Overlay> overlays;
+     std::optional<RuntimeRiivolution::SaveRedirect> saveRedirect;
++    uint32_t lowMemoryBytesWritten = 0;
+ };
+ 
+ std::once_flag g_riivoOnce;
+@@ -250,6 +251,48 @@ void RiivoCollectMappings(const RiivolutionContract::Patch& patch, const std::st
+     }
+ }
+ 
++int RiivoHexNibble(char value) {
++    if (value >= '0' && value <= '9') return value - '0';
++    value = static_cast<char>(std::tolower(static_cast<unsigned char>(value)));
++    return value >= 'a' && value <= 'f' ? value - 'a' + 10 : -1;
++}
++
++void RiivoApplyLowMemoryPatches(const RiivolutionContract::Patch& patch, RiivoState& state) {
++    constexpr uint32_t kFirstDataAddress = 0x80001000u;
++    constexpr uint32_t kEndDataAddress = 0x80006000u;
++    for (const auto& memory : patch.memoryPatches) {
++        // Loader uploads and original-guarded branches are executable patches already
++        // represented by the selected translated product. Only direct low-memory data
++        // writes belong here.
++        if (!memory.valuefile.empty() || !memory.original.empty() || memory.value.empty() ||
++            (memory.value.size() & 1u) != 0u || memory.offset < kFirstDataAddress) {
++            continue;
++        }
++        const size_t byteCount = memory.value.size() / 2u;
++        const uint64_t end = static_cast<uint64_t>(memory.offset) + byteCount;
++        if (end > kEndDataAddress || !Memory::Contains(memory.offset, byteCount)) {
++            continue;
++        }
++        std::vector<uint8_t> bytes;
++        bytes.reserve(byteCount);
++        bool valid = true;
++        for (size_t index = 0; index < memory.value.size(); index += 2u) {
++            const int high = RiivoHexNibble(memory.value[index]);
++            const int low = RiivoHexNibble(memory.value[index + 1u]);
++            if (high < 0 || low < 0) { valid = false; break; }
++            bytes.push_back(static_cast<uint8_t>((high << 4) | low));
++        }
++        if (!valid) continue;
++        for (size_t index = 0; index < bytes.size(); ++index) {
++            Memory::Write8(memory.offset + static_cast<uint32_t>(index), bytes[index]);
++        }
++        state.lowMemoryBytesWritten += static_cast<uint32_t>(bytes.size());
++        RT_LOG(RT_TAG_RIIVOLUTION) << "low-memory data patch: 0x" << std::hex
++                  << std::uppercase << memory.offset << " (" << std::dec << bytes.size()
++                  << " byte(s))" << std::nouppercase << std::endl;
++    }
++}
++
+ std::optional<RuntimeRiivolution::PatchSet> RiivoLoadPatchSet(const fs::path& overlayRoot,
+                                                               RiivoState& state) {
+     const auto xmlSet = RiivoFindXmls(overlayRoot);
+@@ -302,6 +345,7 @@ std::optional<RuntimeRiivolution::PatchSet> RiivoLoadPatchSet(const fs::path& ov
+         const size_t before = set.mappings.size();
+         for (const auto& patch : activePatches) {
+             RiivoCollectMappings(patch, sdRootGeneric, xmlDirGeneric, set);
++            RiivoApplyLowMemoryPatches(patch, state);
+         }
+ 
+         // Highest-priority overlay with a <savegame> wins.
+@@ -348,19 +392,27 @@ void RiivoInitialize() {
+     for (auto& overlay : g_riivoState.overlays) {
+         overlay.patches = RiivoLoadPatchSet(overlay.root, g_riivoState);
+     }
++    if (g_riivoState.lowMemoryBytesWritten != 0) {
++        RT_LOG(RT_TAG_RIIVOLUTION) << "applied " << g_riivoState.lowMemoryBytesWritten
++                  << " selected low-memory data byte(s) before guest entry" << std::endl;
++    }
+ }
+ 
+ } // namespace
+ 
+ namespace RuntimeRiivolution {
+ 
+-const std::vector<Overlay>& Overlays() {
++void Initialize() {
+     std::call_once(g_riivoOnce, RiivoInitialize);
++}
++
++const std::vector<Overlay>& Overlays() {
++    Initialize();
+     return g_riivoState.overlays;
+ }
+ 
+ const std::optional<SaveRedirect>& GetSaveRedirect() {
+-    std::call_once(g_riivoOnce, RiivoInitialize);
++    Initialize();
+     return g_riivoState.saveRedirect;
+ }
+ 
+diff --git a/runtime/src/hle/storage/riivolution.h b/runtime/src/hle/storage/riivolution.h
+index ff7c71c..c6b03a6 100644
+--- a/runtime/src/hle/storage/riivolution.h
++++ b/runtime/src/hle/storage/riivolution.h
+@@ -48,6 +48,10 @@ struct SaveRedirect {
+     bool clone = false;
+ };
+ 
++// Parse the selected XML patches and apply their bounded low-memory data writes.
++// Called before the translated entry point; safe to call repeatedly.
++void Initialize();
++
+ // Discovered overlay roots in precedence order (highest priority first), each
+ // with its active Riivolution mappings. Loaded once, thread-safe.
+ const std::vector<Overlay>& Overlays();
+diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
+index f10a290..6bc7821 100644
+--- a/runtime/src/main.cpp
++++ b/runtime/src/main.cpp
+@@ -44,6 +44,7 @@
+ 
+ #include "abi_bridge.h"
+ #include "guest_flat_memory.h"
++#include "host_fault_access.h"
+ #include "gx_guest_write.h"
+ #include "memory.h"
+ #include "system_bridge.h"
+@@ -52,6 +53,7 @@
+ #include "discord_presence.h"
+ #include "fiber_manager.h"
+ #include "hle_stubs.h"
++#include "hle/storage/riivolution.h"
+ #include "runtime_config.h"
+ #include "runtime_log.h"
+ #include "runtime_product.h"
+@@ -1113,6 +1115,7 @@ void ReportUnhandledSignalFault(int sig, void* faultAddress) {
+ void PosixMemoryFaultHandler(int sig, siginfo_t* info, void* ucontextVoid) {
+     void* faultAddress = info != nullptr ? info->si_addr : nullptr;
+     bool isWrite = false;
++    bool accessKnown = true;
+ #if defined(__x86_64__)
+     // Standard glibc technique for a POSIX fastmem-style handler: bit 1 (0x2) of the hardware
+     // error code x86 pushes on a page fault records whether it was a write.
+@@ -1120,12 +1123,21 @@ void PosixMemoryFaultHandler(int sig, siginfo_t* info, void* ucontextVoid) {
+         auto* uc = static_cast<ucontext_t*>(ucontextVoid);
+         isWrite = (uc->uc_mcontext.gregs[REG_ERR] & 0x2) != 0;
+     }
++#elif defined(__ANDROID__) && defined(__aarch64__)
++    accessKnown = false;
++    if (ucontextVoid != nullptr) {
++        const auto* uc = static_cast<const ucontext_t*>(ucontextVoid);
++        const auto access = HostFault::DecodeAarch64Context(
++            uc->uc_mcontext.__reserved, sizeof(uc->uc_mcontext.__reserved));
++        accessKnown = access != HostFault::Access::Unknown;
++        isWrite = access == HostFault::Access::Write;
++    }
+ #endif
+ 
+     // Guest-space faults are the flat memory interception mechanism (MMIO, deferred EFB reads,
+     // the executable-write guard, unmapped pages). Resolving one here means resuming the
+     // faulting instruction, which just returning from the handler does.
+-    if (faultAddress != nullptr && GuestFlat::HandleAccessViolation(faultAddress, isWrite)) {
++    if (accessKnown && faultAddress != nullptr && GuestFlat::HandleAccessViolation(faultAddress, isWrite)) {
+         return;
+     }
+ 
+@@ -1320,6 +1332,7 @@ int RuntimeMain(int argc, char** argv) {
+             DiscordPresence::Initialize(RuntimeConfigFile::DiscordClientId(), "Mario Kart Wii");
+         }
+         SystemBridge::Initialize();
++        RuntimeRiivolution::Initialize();
+         TranslatedFunctionRegistry::Finalize();
+ 
+         // Initialize Aurora (graphics backend)
+@@ -1485,3 +1498,4 @@ int main(int argc, char** argv) {
+     return RuntimeMain(argc, argv);
+ }
+ extern "C" bool g_dynamicAspectRatioEnabled = false;
++
+diff --git a/runtime/third_party/libco/android.c b/runtime/third_party/libco/android.c
+new file mode 100644
+index 0000000..fa89893
+--- /dev/null
++++ b/runtime/third_party/libco/android.c
+@@ -0,0 +1,68 @@
++/* Android AArch64 backend, ISC license; see LICENSE.
++ * Register layout follows libco's aarch64.c by byuu and the higan team.
++ * Code is linked from android_swap.S, so no data pages become executable.
++ */
++#include "libco.h"
++#include <stdint.h>
++#include <stddef.h>
++#include <stdlib.h>
++#include <string.h>
++
++struct context {
++    uint64_t sp, lr;
++    uint64_t x19_x29[11];
++    uint64_t padding;
++    uint64_t d8_d15[8];
++    uint64_t fpcr, fpsr;
++    void (*entry)(void);
++};
++_Static_assert(offsetof(struct context, d8_d15) == 112, "assembly SIMD offset");
++_Static_assert(offsetof(struct context, fpcr) == 176, "assembly FP offset");
++_Static_assert(offsetof(struct context, entry) == 192, "assembly context size");
++
++static _Thread_local struct context primary;
++static _Thread_local struct context* active;
++extern void mkw_co_swap(struct context* next, struct context* previous);
++
++static void co_entry(void) {
++    active->entry();
++    /* Returning from a cothread is a caller error, as in upstream libco. */
++    abort();
++}
++
++cothread_t co_active(void) {
++    if (!active) active = &primary;
++    return active;
++}
++
++cothread_t co_derive(void* memory, unsigned int size, void (*entry)(void)) {
++    if (!memory || !entry || size < sizeof(struct context) + 1024 ||
++        ((uintptr_t)memory % _Alignof(struct context)) != 0) return NULL;
++    struct context* next = (struct context*)memory;
++    memset(next, 0, sizeof(*next));
++    next->sp = ((uintptr_t)memory + size) & ~(uintptr_t)15;
++    next->lr = (uintptr_t)co_entry;
++    next->entry = entry;
++    __asm__ volatile("mrs %0, fpcr" : "=r"(next->fpcr));
++    __asm__ volatile("mrs %0, fpsr" : "=r"(next->fpsr));
++    co_active();
++    return next;
++}
++
++cothread_t co_create(unsigned int size, void (*entry)(void)) {
++    void* memory = malloc(size);
++    cothread_t result = co_derive(memory, size, entry);
++    if (!result) free(memory);
++    return result;
++}
++
++void co_delete(cothread_t handle) { free(handle); }
++
++void co_switch(cothread_t handle) {
++    struct context* previous = co_active();
++    active = (struct context*)handle;
++    mkw_co_swap(active, previous);
++}
++
++/* Contains process-local entry pointers; do not advertise serialized portability. */
++int co_serializable(void) { return 0; }
+diff --git a/runtime/third_party/libco/android_swap.S b/runtime/third_party/libco/android_swap.S
+new file mode 100644
+index 0000000..e20523f
+--- /dev/null
++++ b/runtime/third_party/libco/android_swap.S
+@@ -0,0 +1,44 @@
++/* ISC license; see LICENSE. Register layout derived from aarch64.c.
++ * x18 is Android's reserved platform register: leave it untouched.
++ * The stack is non-executable. Only ABI-preserved SIMD low halves are saved.
++ */
++.text
++.p2align 2
++.global mkw_co_swap
++.hidden mkw_co_swap
++.type mkw_co_swap, %function
++mkw_co_swap:
++    hint #34                       // BTI c on supporting CPUs; NOP otherwise
++    mov x16, sp
++    stp x16, x30, [x1]
++    stp x19, x20, [x1, #16]
++    stp x21, x22, [x1, #32]
++    stp x23, x24, [x1, #48]
++    stp x25, x26, [x1, #64]
++    stp x27, x28, [x1, #80]
++    str x29, [x1, #96]
++    stp d8, d9, [x1, #112]
++    stp d10, d11, [x1, #128]
++    stp d12, d13, [x1, #144]
++    stp d14, d15, [x1, #160]
++    mrs x16, fpcr
++    mrs x17, fpsr
++    stp x16, x17, [x1, #176]
++    ldp x16, x17, [x0, #176]
++    msr fpcr, x16
++    msr fpsr, x17
++    ldp x19, x20, [x0, #16]
++    ldp x21, x22, [x0, #32]
++    ldp x23, x24, [x0, #48]
++    ldp x25, x26, [x0, #64]
++    ldp x27, x28, [x0, #80]
++    ldr x29, [x0, #96]
++    ldp d8, d9, [x0, #112]
++    ldp d10, d11, [x0, #128]
++    ldp d12, d13, [x0, #144]
++    ldp d14, d15, [x0, #160]
++    ldp x16, x30, [x0]
++    mov sp, x16
++    ret
++.size mkw_co_swap, .-mkw_co_swap
++.section .note.GNU-stack,"",%progbits
+diff --git a/translator/src/Translator.Core/IO/AssemblyBlobWriter.cs b/translator/src/Translator.Core/IO/AssemblyBlobWriter.cs
+index 3a295f0..7f20ed6 100644
+--- a/translator/src/Translator.Core/IO/AssemblyBlobWriter.cs
++++ b/translator/src/Translator.Core/IO/AssemblyBlobWriter.cs
+@@ -22,14 +22,13 @@ internal static class AssemblyBlobWriter
+         var expectedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+         var assembly = new StringBuilder();
+         foreach (var header in headerLines) assembly.AppendLine(header);
+-        // PE/COFF (Windows) and ELF (Linux) spell a read-only data section differently in GNU-as
+-        // syntax - COFF section flags ("dr" = data, read-only) versus an ELF section needing an
+-        // allocatable-only flag plus an explicit @progbits type. The build always targets
+-        // whichever platform the translator itself runs on (there is no cross-compilation
+-        // support), so that's what this picks the section syntax from.
+-        assembly.AppendLine(OperatingSystem.IsWindows()
+-            ? ".section .rdata,\"dr\""
+-            : ".section .rodata,\"a\",@progbits");
++        // .S files are preprocessed by the target compiler. Choose its object format,
++        // not the translator host OS, so Windows can generate Android/Linux inputs.
++        assembly.AppendLine("#if defined(_WIN32)");
++        assembly.AppendLine(".section .rdata,\"dr\"");
++        assembly.AppendLine("#else");
++        assembly.AppendLine(".section .rodata,\"a\",%progbits");
++        assembly.AppendLine("#endif");
+         assembly.AppendLine();
+ 
+         foreach (var blob in blobs)
+@@ -51,18 +50,12 @@ internal static class AssemblyBlobWriter
+         {
+             if (!expectedFiles.Contains(Path.GetFullPath(stalePath))) File.Delete(stalePath);
+         }
+-        if (!OperatingSystem.IsWindows())
+-        {
+-            // Absence of a .note.GNU-stack section makes the linker assume the oldest, most
+-            // conservative default for this object (an executable stack) and warn about it; this
+-            // file has no code needing one, so mark it explicitly like every other GNU-as ELF
+-            // object linked into the binary already does (the norm on modern toolchains, just not
+-            // producible without an explicit section since this file is hand-assembled, not
+-            // compiler-emitted).
+-            assembly.AppendLine(".section .note.GNU-stack,\"\",@progbits");
+-        }
++        assembly.AppendLine("#if !defined(_WIN32)");
++        assembly.AppendLine(".section .note.GNU-stack,\"\",%progbits");
++        assembly.AppendLine("#endif");
+         FileOutput.WriteTextIfChanged(assemblyPath, assembly.ToString());
+     }
+ 
+     private static string SanitizeAssemblyPath(string path) => Path.GetFullPath(path).Replace('\\', '/');
+ }
++

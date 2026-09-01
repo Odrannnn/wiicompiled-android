@@ -1,0 +1,23 @@
+cmake_minimum_required(VERSION 3.25)
+project(wiicompiled_android_probe LANGUAGES C CXX ASM)
+
+if(NOT ANDROID OR NOT ANDROID_ABI STREQUAL "arm64-v8a")
+    message(FATAL_ERROR "This diagnostic target requires Android arm64-v8a")
+endif()
+get_filename_component(PORT_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../../.." ABSOLUTE)
+set(MKW_RUNTIME "${PORT_ROOT}/upstream/wiicompiled/runtime")
+if(NOT EXISTS "${MKW_RUNTIME}/cmake/GuestCoroutines.cmake")
+    message(FATAL_ERROR "Run scripts/Bootstrap.ps1 to fetch and patch the pinned upstream source")
+endif()
+include("${MKW_RUNTIME}/cmake/GuestCoroutines.cmake")
+add_library(wiicompiled_probe SHARED probe.cpp)
+target_compile_features(wiicompiled_probe PRIVATE cxx_std_17)
+target_include_directories(wiicompiled_probe PRIVATE "${MKW_RUNTIME}/include")
+# Match translator PPC rounding policy, including in Release builds.
+target_compile_options(wiicompiled_probe PRIVATE -fno-fast-math -ffp-contract=off -Wall -Wextra)
+target_link_libraries(wiicompiled_probe PRIVATE mkw::libco android)
+target_link_options(wiicompiled_probe PRIVATE "-Wl,-z,max-page-size=16384" "-Wl,-z,defs")
+
+add_executable(wiicompiled_fault_probe "${PORT_ROOT}/android/native-tests/fault_probe.cpp")
+target_compile_features(wiicompiled_fault_probe PRIVATE cxx_std_17)
+target_include_directories(wiicompiled_fault_probe PRIVATE "${MKW_RUNTIME}/include")

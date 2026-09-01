@@ -1,0 +1,24 @@
+WiiCompiled Android Port Lab — experimental, unofficial development work.
+Source workspace: android/ and patches/ in this repository.
+WiiCompiled: https://github.com/patchzyy/wiicompiled
+Pinned revision: 7aa04bfe808bfac89d9dc992ada35d1ce96e3a8d
+WiiCompiled is GPL-3.0. The linked PPC floating-point helpers include
+Dolphin Emulator code under GPL-2.0-or-later; see their source headers.
+New application code is GPL-3.0-only. Coroutine backend is ISC.
+libco copyright byuu and the higan team. Full GPL and ISC license texts
+are bundled alongside this notice in APK assets.
+libadrenotools and liblinkernsbypass: https://github.com/bylaws/libadrenotools
+Used only to load a user-selected Vulkan driver inside the app process.
+Both are BSD-2-Clause; their license text is bundled as LICENSE-libadrenotools.txt.
+WheelWizard: https://github.com/TeamWheelWizard/WheelWizard
+Pinned revision: 220ce0b711f9604797c9753a36c8607f020743bd
+WheelWizard's mod profile and launch-overlay behavior are the reference for
+the Android manager implementation in this APK. The desktop .NET application
+is not embedded. This app is not endorsed by either team.
+Pulsar / Retro Rewind loose archive and BRSAR override behavior:
+https://github.com/Retro-Rewind-Team/rr-pulsar
+Pinned revision: 8dadf1f5f0010b768b3f2aa6b3f2a5cc882f20e8
+The Android BRSAR composer adapts the file-ID override layout documented by
+Pulsar's MIT-licensed LooseBRSAROverrides implementation. See LICENSE-Pulsar.txt.
+No Nintendo code, translated game code, disc images or assets are bundled.
+Not affiliated with Nintendo.
