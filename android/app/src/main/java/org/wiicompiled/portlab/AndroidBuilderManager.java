@@ -163,6 +163,10 @@ final class AndroidBuilderManager {
         progress.update("Verifying and activating the private runtime…", 97);
         String finished = RuntimePackManager.installBuilt(context, result, retroResult, sdk);
         context.getSharedPreferences("android-builder", Context.MODE_PRIVATE).edit().putString("status", finished).apply();
+        deleteRecursively(workspace);
+        deleteRecursively(objects);
+        deleteRecursively(new File(root, "output"));
+        deleteRecursively(bin);
         progress.update(finished, 100); return finished;
     }
 
