@@ -44,8 +44,11 @@ final class GpuDriverManager {
         File status = new File(context.getFilesDir(), "gpu-driver-runtime-status.txt");
         if (!status.isFile()) return null;
         try (FileInputStream input = new FileInputStream(status)) {
-            byte[] bytes = input.readNBytes(8192);
-            return new String(bytes, java.nio.charset.StandardCharsets.UTF_8).trim();
+            byte[] bytes = new byte[8192];
+            int total = 0;
+            for (int read; total < bytes.length
+                    && (read = input.read(bytes, total, bytes.length - total)) != -1;) total += read;
+            return new String(bytes, 0, total, java.nio.charset.StandardCharsets.UTF_8).trim();
         } catch (IOException ignored) { return null; }
     }
 

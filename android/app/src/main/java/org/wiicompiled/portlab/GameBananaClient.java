@@ -33,7 +33,7 @@ final class GameBananaClient {
         String query = term == null || term.isBlank() ? "Mod" : term.trim();
         if (query.length() < 2) query = "Mod";
         String url = API + "/Util/Search/Results?_sSearchString="
-            + URLEncoder.encode(query, StandardCharsets.UTF_8) + "&_idGameRow=5896&_sModelName=Mod&_nPage="
+            + URLEncoder.encode(query, "UTF-8") + "&_idGameRow=5896&_sModelName=Mod&_nPage="
             + Math.max(page, 1);
         JSONObject root = parseJson(readJson(url)); JSONArray records = root.optJSONArray("_aRecords");
         if (records == null) return Collections.emptyList();
@@ -108,7 +108,7 @@ final class GameBananaClient {
                 if (output.size() + read > maximum) throw new IOException("Server response is too large");
                 output.write(buffer, 0, read);
             }
-            return output.toString(StandardCharsets.UTF_8);
+            return output.toString("UTF-8");
         } finally { connection.disconnect(); }
     }
 
