@@ -18,6 +18,7 @@ try {
     $env:PATH = "$ndkBin;$oldPath"
     & $dotnet publish $project -c Release -r linux-bionic-arm64 `
         -p:PublishAot=true -p:DisableUnsupportedError=true -p:PublishAotUsingRuntimePack=true `
+        -p:JsonSerializerIsReflectionEnabledByDefault=true `
         -p:StripSymbols=true -p:TreatWarningsAsErrors=false -p:IlcTreatWarningsAsErrors=false `
         -p:SuppressTrimAnalysisWarnings=true -p:IlcGenerateCompleteTypeMetadata=true --nologo
     if ($LASTEXITCODE -ne 0) { throw 'Android Native AOT translator build failed.' }
