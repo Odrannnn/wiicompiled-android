@@ -1,6 +1,7 @@
 plugins { id 'com.android.application' }
 
 def withGame = project.hasProperty('withGame')
+def withBuilder = project.hasProperty('withBuilder')
 
 android {
     namespace 'org.wiicompiled.portlab'
@@ -11,6 +12,7 @@ android {
     defaultConfig {
         // Kept for compatibility with private developer builds that still embed a runtime.
         buildConfigField 'boolean', 'WITH_GAME', withGame.toString()
+        buildConfigField 'boolean', 'WITH_BUILDER', withBuilder.toString()
         applicationId 'org.wiicompiled.portlab'
         minSdk 30
         targetSdk 36
@@ -32,6 +34,11 @@ android {
         sourceSets.debug.java.srcDirs += ["src/game/java"]
         sourceSets.debug.manifest.srcFile "src/game/AndroidManifest.xml"
         sourceSets.debug.jniLibs.srcDirs += ["../../private/android-apk-libs"]
+        packaging.jniLibs.useLegacyPackaging = true
+    }
+    if (withBuilder) {
+        sourceSets.debug.jniLibs.srcDirs += ["../../.tools/android-builder/jniLibs"]
+        sourceSets.debug.assets.srcDirs += ["../../.tools/android-builder/assets"]
         packaging.jniLibs.useLegacyPackaging = true
     }
     sourceSets.main.java.srcDirs += ["src/sdl/java"]

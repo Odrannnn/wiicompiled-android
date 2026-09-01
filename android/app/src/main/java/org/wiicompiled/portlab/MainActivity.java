@@ -2,6 +2,9 @@ package org.wiicompiled.portlab;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.net.Uri;
@@ -33,7 +36,7 @@ public final class MainActivity extends Activity {
     private static final int PICK_DISC = 1, EXPORT_REPORT = 2, PICK_GPU_DRIVER = 3, PICK_MOD = 4,
         PICK_RUNTIME_PACK = 5;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
-    private TextView diagnostics, discStatus, gpuDriverStatus, modStatus, retroRewindStatus, runtimeStatus;
+    private TextView diagnostics, discStatus, gpuDriverStatus, modStatus, retroRewindStatus, runtimeStatus, builderStatus;
     private LinearLayout modsContainer;
     private Button testButton;
     private Button[] navigationButtons;
@@ -41,6 +44,14 @@ public final class MainActivity extends Activity {
     private int selectedPage;
     private String report = "No native diagnostics have run.";
     private boolean stopped;
+    private boolean builderReceiverRegistered;
+    private final BroadcastReceiver builderReceiver = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) {
+            updateBuilderUi(intent.getStringExtra(BuilderService.EXTRA_STATUS),
+                intent.getIntExtra(BuilderService.EXTRA_PERCENT, 0),
+                intent.getBooleanExtra(BuilderService.EXTRA_RUNNING, false));
+        }
+    };
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -126,6 +137,23 @@ public final class MainActivity extends Activity {
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION); startActivityForResult(intent, PICK_RUNTIME_PACK);
         });
         addCard(page, runtime);
+        LinearLayout builder = card("Build on this Android device",
+            "The Builder edition translates your extracted disc and compiles a private ARM64 runtime here. No PC or Termux is required. Keep at least 4 GiB free and connect power.");
+        builderStatus = label(builder, AndroidBuilderManager.status(this), 15, Color.rgb(209, 250, 229));
+        Button build = button(builder, "Build private runtime", v -> {
+            if (!AndroidBuilderManager.available(this)) {
+                new android.app.AlertDialog.Builder(this).setTitle("Builder edition required")
+                    .setMessage(AndroidBuilderManager.status(this)).setPositiveButton("Close", null).show(); return;
+            }
+            Intent service = new Intent(this, BuilderService.class).setAction(BuilderService.ACTION_START);
+            startForegroundService(service); updateBuilderUi("Starting private Android build…", 0, true);
+        });
+        build.setEnabled(AndroidBuilderManager.available(this));
+        button(builder, "Cancel current build", v -> {
+            Intent service = new Intent(this, BuilderService.class).setAction(BuilderService.ACTION_CANCEL);
+            startService(service);
+        });
+        addCard(page, builder);
         LinearLayout disc = card("PAL disc reference",
             "Extract your own clean PAL RMCP01 image directly into app-private storage. Supports ISO, RVZ, WBFS, WIA, CISO, and GCZ.");
         discStatus = label(disc, getPreferences(MODE_PRIVATE).getString("discStatus", DiscExtractor.installedStatus(this)),
@@ -229,6 +257,29 @@ public final class MainActivity extends Activity {
             return;
         }
         Intent game = new Intent(); game.setClassName(this, "org.wiicompiled.portlab.GameActivity"); startActivity(game);
+    }
+
+    private void updateBuilderUi(String message, int percent, boolean running) {
+        if (builderStatus == null) return;
+        String text = message == null ? AndroidBuilderManager.status(this) : message;
+        if (running && percent > 0) text += "\n" + percent + "% complete";
+        builderStatus.setText(text);
+        if (!running && percent >= 100 && runtimeStatus != null) runtimeStatus.setText(RuntimePackManager.status(this));
+    }
+
+    @Override protected void onStart() {
+        super.onStart(); stopped = false;
+        IntentFilter filter = new IntentFilter(BuilderService.ACTION_UPDATE);
+        if (android.os.Build.VERSION.SDK_INT >= 33) registerReceiver(builderReceiver, filter, RECEIVER_NOT_EXPORTED);
+        else registerReceiver(builderReceiver, filter);
+        builderReceiverRegistered = true;
+        updateBuilderUi(BuilderService.isRunning() ? BuilderService.currentStatus() : AndroidBuilderManager.status(this),
+            BuilderService.currentPercent(), BuilderService.isRunning());
+    }
+
+    @Override protected void onStop() {
+        if (builderReceiverRegistered) { unregisterReceiver(builderReceiver); builderReceiverRegistered = false; }
+        super.onStop();
     }
 
     private void showPage(int index) {

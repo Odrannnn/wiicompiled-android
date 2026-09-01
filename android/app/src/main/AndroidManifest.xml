@@ -2,6 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <!-- No broad storage access. Local files still require explicit document selection. -->
     <application android:label="WiiCompiled Port Lab" android:allowBackup="false" android:icon="@drawable/ic_portlab" android:dataExtractionRules="@xml/data_extraction_rules"
         android:supportsRtl="true" android:theme="@android:style/Theme.Material.NoActionBar">
@@ -14,6 +16,7 @@
         <activity android:name=".GameActivity" android:exported="false" android:process=":game"
             android:screenOrientation="sensorLandscape" android:hardwareAccelerated="true"
             android:configChanges="layoutDirection|locale|grammaticalGender|fontScale|fontWeightAdjustment|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation" />
+        <service android:name=".BuilderService" android:exported="false" android:foregroundServiceType="dataSync" />
     </application>
 </manifest>
 

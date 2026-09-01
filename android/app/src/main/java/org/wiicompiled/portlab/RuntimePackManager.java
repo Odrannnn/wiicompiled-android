@@ -22,6 +22,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
+import java.util.Comparator;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
@@ -76,18 +77,40 @@ final class RuntimePackManager {
             extract(context, uri, staging);
             Pack pack = validate(staging);
             installResources(context, pack);
-            File active = new File(root, ACTIVE), old = new File(root, "previous");
-            deleteRecursively(old);
-            if (active.exists() && !active.renameTo(old)) throw new IOException("Cannot preserve the previous runtime pack");
-            if (!staging.renameTo(active)) {
-                if (old.exists()) old.renameTo(active);
-                throw new IOException("Cannot activate the imported runtime pack");
-            }
-            deleteRecursively(old);
+            activate(root, staging);
             return "Activated " + displayName(context, uri) + ".\n" + status(context);
         } catch (IOException | RuntimeException error) {
             deleteRecursively(staging);
             throw error;
+        }
+    }
+
+    static String installBuilt(Context context, File gameLibrary, File sdkRoot) throws IOException {
+        if (!gameLibrary.isFile()) throw new IOException("The Android build produced no game library");
+        File root = root(context), staging = new File(root, "building-" + System.currentTimeMillis());
+        if (!staging.mkdirs()) throw new IOException("Cannot create private runtime staging directory");
+        try {
+            File lib = new File(staging, "lib/arm64-v8a");
+            if (!lib.mkdirs()) throw new IOException("Cannot create runtime library directory");
+            Files.copy(gameLibrary.toPath(), new File(lib, "libWiiCompiled.so").toPath());
+            File nativeLib = new File(context.getApplicationInfo().nativeLibraryDir);
+            for (String name : LOAD_ORDER) {
+                File source = new File(nativeLib, name);
+                if (source.isFile()) Files.copy(source.toPath(), new File(lib, name).toPath());
+            }
+            File assets = new File(sdkRoot, "kit/runtime/assets");
+            copyTree(new File(assets, "wii"), new File(staging, "resources/wii_bootstrap"));
+            Files.copy(new File(assets, "dsp/dsp_coef.bin").toPath(),
+                new File(staging, "resources/dsp_coef.bin").toPath(), StandardCopyOption.REPLACE_EXISTING);
+            Files.copy(new File(assets, "pipeline/initial_pipeline_cache.db").toPath(),
+                new File(staging, "resources/initial_pipeline_cache.db").toPath(), StandardCopyOption.REPLACE_EXISTING);
+            writeManifest(staging, "Built on this Android device");
+            Pack pack = validate(staging);
+            installResources(context, pack);
+            activate(root, staging);
+            return "Private ARM64 runtime built and activated.\n" + status(context);
+        } catch (IOException | RuntimeException error) {
+            deleteRecursively(staging); throw error;
         }
     }
 
@@ -198,6 +221,36 @@ final class RuntimePackManager {
         if (external == null) throw new IOException("External app storage unavailable");
         File game = new File(external, "game");
         copyTree(source, game);
+    }
+
+    private static void writeManifest(File directory, String label) throws IOException {
+        List<File> files = new ArrayList<>(); collectFiles(directory, files);
+        files.removeIf(file -> MANIFEST.equals(relative(directory, file)));
+        files.sort(Comparator.comparing(file -> relative(directory, file)));
+        Properties values = new Properties();
+        values.setProperty("format", Integer.toString(FORMAT));
+        values.setProperty("gameId", "RMCP01"); values.setProperty("discRevision", "0");
+        values.setProperty("abi", "arm64-v8a"); values.setProperty("label", label);
+        values.setProperty("fileCount", Integer.toString(files.size()));
+        for (int index = 0; index < files.size(); index++) {
+            String path = relative(directory, files.get(index));
+            values.setProperty("file." + index + ".path", path);
+            values.setProperty("file." + index + ".sha256", sha256(files.get(index)));
+        }
+        try (OutputStream output = new FileOutputStream(new File(directory, MANIFEST))) {
+            values.store(output, "Private WiiCompiled runtime generated locally");
+        }
+    }
+
+    private static void activate(File root, File staging) throws IOException {
+        File active = new File(root, ACTIVE), old = new File(root, "previous");
+        deleteRecursively(old);
+        if (active.exists() && !active.renameTo(old)) throw new IOException("Cannot preserve the previous runtime pack");
+        if (!staging.renameTo(active)) {
+            if (old.exists()) old.renameTo(active);
+            throw new IOException("Cannot activate the private runtime pack");
+        }
+        deleteRecursively(old);
     }
 
     private static void copyTree(File source, File destination) throws IOException {
