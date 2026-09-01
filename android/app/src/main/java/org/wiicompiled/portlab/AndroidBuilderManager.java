@@ -62,10 +62,11 @@ final class AndroidBuilderManager {
             throw new IOException("At least 4 GiB of free internal storage is required for translation and compilation");
 
         File root = new File(context.getFilesDir(), "android-builder");
-        File sdk = new File(root, "sdk-v1"), marker = new File(sdk, ".complete");
+        File sdk = new File(root, "sdk-v2"), marker = new File(sdk, ".complete");
         if (!marker.isFile()) {
             progress.update("Preparing the compiler and reusable runtime SDK…", 2);
             deleteRecursively(sdk);
+            deleteRecursively(new File(root, "sdk-v1"));
             if (!sdk.mkdirs()) throw new IOException("Cannot create the private builder SDK directory");
             extractAsset(context, "compiler-sdk.zip", sdk);
             extractAsset(context, "runtime-sdk.zip", sdk);

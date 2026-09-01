@@ -48,7 +48,9 @@ try {
     foreach ($required in @(
         'toolchain/sysroot/usr/include/stdio.h',
         'toolchain/sysroot/usr/include/c++/v1/vector',
-        "toolchain/lib/clang/$($lock.llvmAndroid.version.Split('.')[0])/lib/linux/libclang_rt.builtins-aarch64-android.a"
+        "toolchain/lib/clang/$($lock.llvmAndroid.version.Split('.')[0])/lib/linux/libclang_rt.builtins-aarch64-android.a",
+        "toolchain/lib/clang/$($lock.llvmAndroid.version.Split('.')[0])/lib/linux/aarch64/libatomic.a",
+        "toolchain/lib/clang/$($lock.llvmAndroid.version.Split('.')[0])/lib/linux/aarch64/libunwind.a"
     )) {
         if (-not $entries.ContainsKey($required)) { throw "Compiler SDK archive is missing $required" }
     }

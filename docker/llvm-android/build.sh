@@ -52,5 +52,13 @@ cp -R "$target_build/lib/clang/${LLVM_VERSION%%.*}/include" \
   "$sdk_stage/toolchain/lib/clang/${LLVM_VERSION%%.*}/include"
 cp "$ndk"/toolchains/llvm/prebuilt/linux-x86_64/lib/clang/*/lib/linux/libclang_rt.builtins-aarch64-android.a \
   "$sdk_stage/toolchain/lib/clang/${LLVM_VERSION%%.*}/lib/linux/"
+# Clang's Android driver adds this architecture-specific resource directory to
+# the final library search path. libc++, compiler-emitted atomics, and unwind
+# references need these NDK runtime archives when linking inside the app.
+mkdir -p "$sdk_stage/toolchain/lib/clang/${LLVM_VERSION%%.*}/lib/linux/aarch64"
+cp "$ndk"/toolchains/llvm/prebuilt/linux-x86_64/lib/clang/*/lib/linux/aarch64/libatomic.a \
+  "$sdk_stage/toolchain/lib/clang/${LLVM_VERSION%%.*}/lib/linux/aarch64/"
+cp "$ndk"/toolchains/llvm/prebuilt/linux-x86_64/lib/clang/*/lib/linux/aarch64/libunwind.a \
+  "$sdk_stage/toolchain/lib/clang/${LLVM_VERSION%%.*}/lib/linux/aarch64/"
 rm -f "/out/assets/compiler-sdk.zip"
 (cd "$sdk_stage" && cmake -E tar cf "/out/assets/compiler-sdk.zip" --format=zip toolchain)
