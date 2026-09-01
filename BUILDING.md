@@ -147,19 +147,21 @@ Extraction follows these checks:
 
 Keep enough free tablet storage for the extracted data in addition to the source image. Closing or force-stopping the app interrupts extraction; the next attempt removes stale staging data and preserves or restores the previous installed disc.
 
-On-device extraction supplies the private inputs. In the Builder edition, choose **Build private runtime** after extraction. Keep the tablet connected to power and leave at least 4 GiB of free internal storage. A foreground data-sync service keeps the work alive while the activity is backgrounded and exposes progress plus cancellation.
+On-device extraction supplies the private inputs. In the Builder edition, choose **Build private runtime** after extraction. Keep the tablet connected to power and leave at least 4 GiB of free internal storage. A foreground data-sync service keeps the work alive while the activity is backgrounded and exposes progress plus cancellation. If the pinned Retro Rewind profile is enabled, the builder automatically includes it. Enabling Retro Rewind after a base-only build requires one full mod-aware regeneration; once the combined pack is active, no rebuild is needed until the pinned code profile changes.
 
 The device performs these steps in app-private storage:
 
 1. verifies that the extracted `main.dol` and `StaticR.rel` are present;
 2. expands the pinned compiler and reusable runtime SDKs;
-3. runs `translate-recursive`, `emit-base-manifest`, `generate-data-init`, and `emit-build-shards`;
-4. compiles the generated base shards for `aarch64-linux-android30` with at most four translation threads and one compiler process at a time;
-5. links and strips `libWiiCompiled.so` with 16 KiB ELF page alignment;
-6. hashes the result and dependencies into a private runtime-pack manifest, atomically activates it, and installs the bootstrap resources;
-7. enables the existing **Launch Mario Kart Wii** button.
+3. stages the enabled pinned Retro Rewind `Code.pul`, `Loader.pul`, and XML inside the disposable workspace when present;
+4. runs `translate-recursive`, `emit-base-manifest`, `generate-data-init`, optional `translate-mod`, and `emit-build-shards`;
+5. compiles the generated base and optional Retro Rewind shards for `aarch64-linux-android30` with at most four translation threads and one compiler process at a time;
+6. links and strips `libWiiCompiled.so` and, when requested, `libRetroRewind.so` with 16 KiB ELF page alignment;
+7. hashes the products and dependencies into one private runtime-pack manifest, atomically activates it, and installs the bootstrap resources;
+8. removes the successful build's generated sources, objects, and link outputs while retaining the reusable compiler SDK and build log;
+9. enables the existing **Launch Mario Kart Wii** button.
 
-The ROM, extracted files, generated source, object files, logs, and final runtime remain under the application's private directories. Termux and a PC are not used by this device-side procedure. The PC toolchain described above is only needed by maintainers to produce the distributable Builder APK.
+The source ROM remains wherever the user selected it. Extracted disc files, the reusable compiler SDK, the build log, and the active runtime pack remain under the application's private directories. Failed build workspaces remain for diagnosis and are replaced by the next attempt. Successful build workspaces, object files, and intermediate link outputs are deleted. Termux and a PC are not used by this device-side procedure. The PC toolchain described above is only needed by maintainers to produce the distributable Builder APK.
 
 ## Legacy PC-built private runtime
 
