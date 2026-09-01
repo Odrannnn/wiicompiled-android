@@ -8,5 +8,20 @@
     "version": "v2.0.0-alpha.10",
     "url": "https://github.com/encounter/nod/releases/download/v2.0.0-alpha.10/nodtool-windows-x86_64.exe",
     "sha256": "1e150e33b88157527f96caea89ad12267aed8b117180c9ebaa89ebe89c1d948d"
+  },
+  "rust": {
+    "version": "1.88.0"
+  },
+  "nodVendor": {
+    "version": "v2.0.0-alpha.10",
+    "url": "https://github.com/encounter/nod/releases/download/v2.0.0-alpha.10/vendored-crates-v2.0.0-alpha.10.tar.zst",
+    "sha256": "e482b6733351add58e711af9880a3ccd066a0eaaac17bf7ffb07306a6925a995"
+  },
+  "android": {
+    "compileSdk": 36,
+    "minSdk": 30,
+    "ndk": "29.0.14206865",
+    "cmake": "3.31.5",
+    "java": 17
   }
 }

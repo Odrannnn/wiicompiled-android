@@ -11,4 +11,9 @@ if (-not (Test-Path $sdkArchive)) { Invoke-WebRequest $lock.dotnet.url -OutFile 
 if ((Get-FileHash $sdkArchive -Algorithm SHA512).Hash -ne $lock.dotnet.sha512) { throw '.NET SDK checksum mismatch.' }
 $sdkDirectory = Join-Path $toolRoot 'dotnet'
 if (-not (Test-Path (Join-Path $sdkDirectory 'dotnet.exe'))) { Expand-Archive $sdkArchive $sdkDirectory }
-Write-Host 'Workspace-local .NET SDK and nodtool are ready.'
+$vendorArchive = Join-Path $toolRoot "vendored-crates-$($lock.nodVendor.version).tar.zst"
+if (-not (Test-Path $vendorArchive)) { Invoke-WebRequest $lock.nodVendor.url -OutFile $vendorArchive }
+if ((Get-FileHash $vendorArchive -Algorithm SHA256).Hash -ne $lock.nodVendor.sha256) {
+    throw 'NOD vendored-crates checksum mismatch.'
+}
+Write-Host 'Workspace-local .NET SDK, nodtool, and NOD offline vendor archive are ready.'

@@ -20,5 +20,9 @@ https://github.com/Retro-Rewind-Team/rr-pulsar
 Pinned revision: 8dadf1f5f0010b768b3f2aa6b3f2a5cc882f20e8
 The Android BRSAR composer adapts the file-ID override layout documented by
 Pulsar's MIT-licensed LooseBRSAROverrides implementation. See LICENSE-Pulsar.txt.
+NOD: https://github.com/encounter/nod
+Pinned revision: dc18d2ff129f05228b8510ea092d8b24c290a49a
+NOD reads user-selected ISO, WBFS, WIA, RVZ, CISO, and GCZ disc images on-device.
+It is distributed under MIT OR Apache-2.0; both license texts are bundled.
 No Nintendo code, translated game code, disc images or assets are bundled.
 Not affiliated with Nintendo.

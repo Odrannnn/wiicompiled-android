@@ -1,20 +1,21 @@
 param(
     [ValidateRange(1,64)][int]$Jobs = 8,
     [string]$SdkPath = $env:ANDROID_HOME,
-    [string]$SigningDirectory = (Join-Path $env:USERPROFILE '.android'),
+    [string]$SigningDirectory = (Join-Path $PSScriptRoot '../private/signing'),
     [string]$ExpectedCertificateSha256 = 'A6B1924D07EFDE502F72F25D32A3A83DF3D97B6B79829B107BC057963C213C39',
     [switch]$BaseOnly
 )
 $ErrorActionPreference = 'Stop'
 $portRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$toolchain = Get-Content (Join-Path $portRoot 'toolchain.lock.json') -Raw | ConvertFrom-Json
 if (-not $SdkPath) { $SdkPath = Join-Path $env:LOCALAPPDATA 'Android/Sdk' }
 $workspace = Join-Path $portRoot 'upstream/wiicompiled'
 if (-not (Test-Path (Join-Path $workspace 'generated/build_shards/shards.cmake'))) {
     throw 'Run Prepare-Game.ps1 first.'
 }
-$cmake = Join-Path $SdkPath 'cmake/3.31.5/bin/cmake.exe'
-$ninja = Join-Path $SdkPath 'cmake/3.31.5/bin/ninja.exe'
-$ndk = Join-Path $SdkPath 'ndk/29.0.14206865'
+$cmake = Join-Path $SdkPath "cmake/$($toolchain.android.cmake)/bin/cmake.exe"
+$ninja = Join-Path $SdkPath "cmake/$($toolchain.android.cmake)/bin/ninja.exe"
+$ndk = Join-Path $SdkPath "ndk/$($toolchain.android.ndk)"
 $apksigner = Join-Path $SdkPath 'build-tools/36.0.0/apksigner.bat'
 $build = Join-Path $portRoot 'private/android-runtime'
 $signingKey = Join-Path $SigningDirectory 'debug.keystore'
@@ -24,6 +25,8 @@ if (-not (Test-Path -LiteralPath $signingKey -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $apksigner -PathType Leaf)) {
     throw "Android APK signer was not found: $apksigner"
 }
+& (Join-Path $PSScriptRoot 'Build-NodAndroid.ps1') -SdkPath $SdkPath
+if ($LASTEXITCODE -ne 0) { throw 'Android disc extractor dependency build failed.' }
 
 $runtimeTargets = @('WiiCompiled')
 if (-not $BaseOnly) {

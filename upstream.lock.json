@@ -15,5 +15,9 @@
   "Pulsar": {
     "url": "https://github.com/Retro-Rewind-Team/rr-pulsar.git",
     "commit": "8dadf1f5f0010b768b3f2aa6b3f2a5cc882f20e8"
+  },
+  "nod": {
+    "url": "https://github.com/encounter/nod.git",
+    "commit": "dc18d2ff129f05228b8510ea092d8b24c290a49a"
   }
 }
