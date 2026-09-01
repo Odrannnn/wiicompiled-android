@@ -10,12 +10,20 @@ if(NOT EXISTS "${MKW_RUNTIME}/cmake/GuestCoroutines.cmake")
     message(FATAL_ERROR "Run scripts/Bootstrap.ps1 to fetch and patch the pinned upstream source")
 endif()
 include("${MKW_RUNTIME}/cmake/GuestCoroutines.cmake")
-add_library(wiicompiled_probe SHARED probe.cpp)
+set(NOD_ANDROID "${PORT_ROOT}/.tools/nod-android")
+if(NOT EXISTS "${NOD_ANDROID}/lib/${ANDROID_ABI}/libnod.a")
+    message(FATAL_ERROR "Run scripts/Build-NodAndroid.ps1 before building the Android app")
+endif()
+add_library(nod STATIC IMPORTED)
+set_target_properties(nod PROPERTIES
+    IMPORTED_LOCATION "${NOD_ANDROID}/lib/${ANDROID_ABI}/libnod.a"
+    INTERFACE_INCLUDE_DIRECTORIES "${NOD_ANDROID}/include")
+add_library(wiicompiled_probe SHARED probe.cpp disc_extractor.cpp)
 target_compile_features(wiicompiled_probe PRIVATE cxx_std_17)
 target_include_directories(wiicompiled_probe PRIVATE "${MKW_RUNTIME}/include")
 # Match translator PPC rounding policy, including in Release builds.
 target_compile_options(wiicompiled_probe PRIVATE -fno-fast-math -ffp-contract=off -Wall -Wextra)
-target_link_libraries(wiicompiled_probe PRIVATE mkw::libco android)
+target_link_libraries(wiicompiled_probe PRIVATE mkw::libco nod android log dl z)
 target_link_options(wiicompiled_probe PRIVATE "-Wl,-z,max-page-size=16384" "-Wl,-z,defs")
 
 add_executable(wiicompiled_fault_probe "${PORT_ROOT}/android/native-tests/fault_probe.cpp")
