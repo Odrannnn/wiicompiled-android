@@ -4,7 +4,7 @@ This document is the canonical setup record for the WiiCompiled Android workbenc
 
 ## Publication boundary
 
-The repository and game-free Port Lab APK may contain the Android application, the NOD disc reader, and upstream license texts. They must not contain any of the following:
+The repository and game-free APKs may contain the Android application, NOD disc reader, signed ARM64 translator/compiler tools, reusable open-source runtime archives, and upstream license texts. They must not contain any of the following:
 
 - a Mario Kart Wii ISO, RVZ, WBFS, WIA, CISO, or GCZ;
 - extracted disc files, `main.dol`, or `StaticR.rel`;
@@ -29,6 +29,9 @@ The canonical Windows build uses:
 | Android build tools | 36.0.0 | Local Android SDK |
 | Android NDK | 29.0.14206865 | `toolchain.lock.json` and Gradle |
 | Android CMake | 3.31.5 | `toolchain.lock.json` and Gradle |
+| Builder LLVM/Clang/LLD | 21.1.8 | `toolchain.lock.json` |
+| Native AOT Android runtime | 8.0.30 | `toolchain.lock.json` |
+| Native AOT build NDK | 25.1.8937393 | `toolchain.lock.json` |
 | Rust in the extractor container | 1.88.0 | `toolchain.lock.json` |
 | .NET SDK | 8.0.424 | `toolchain.lock.json` |
 | NOD / nodtool | v2.0.0-alpha.10 | both lock files |
@@ -43,6 +46,7 @@ The container bases are pinned by digest in `docker/nod-android/Dockerfile`. The
 | --- | --- | --- |
 | `android/` | Android source and Gradle wrapper | Tracked |
 | `docker/nod-android/` | Pinned ARM64 NOD builder | Tracked |
+| `docker/llvm-android/` | Pinned relocatable ARM64 Clang/LLD builder | Tracked |
 | `scripts/` | Reproducible setup, build, signing, and deployment commands | Tracked |
 | `patches/` | Android changes applied to pinned WiiCompiled | Tracked |
 | `upstream/` | Pinned upstream checkouts and generated files | Ignored |
@@ -104,7 +108,26 @@ Install it only on an explicitly named ADB device:
 .\scripts\Install-Probe.ps1 -Serial '<adb serial>'
 ```
 
-The Port Lab build contains the on-device disc extractor and diagnostics. It has no `GameActivity`, translated game runtime, ROM, Retro Rewind distribution, or custom driver payload.
+The Port Lab contains disc extraction, diagnostics, the SDL game host, mod management, and runtime-pack import. The Play button remains visible, but launch is gated until a verified private runtime exists. It contains no translated game runtime, ROM, Retro Rewind distribution, or custom driver payload.
+
+## Build the self-contained Builder edition
+
+Run:
+
+```powershell
+.\scripts\Build-BuilderApk.ps1
+```
+
+The script builds four game-free payloads and then signs `artifacts/WiiCompiled-Builder-debug.apk`:
+
+1. the WiiCompiled translator as a .NET Native AOT `linux-bionic-arm64` executable;
+2. relocatable ARM64 Clang, LLD, and llvm-ar 21.1.8 in the pinned Docker image;
+3. a case-safe compressed NDK 29 sysroot and Clang resource directory;
+4. the reusable Android runtime support archive and its open-source Aurora, Dawn, SDL, Crypto++, and support libraries.
+
+The compiler executables are stored as APK native libraries so Android extracts them onto an executable, signed application path. The app creates private symlinks named `clang++` and `ld.lld`; it never executes a binary copied into writable storage. The SDK stays zipped in the APK and is expanded into app-private storage on the first build. This avoids Android's writable-code execution restrictions and avoids Termux's package-name-specific prefix.
+
+The verified `0.3.0-alpha.1` debug Builder APK is 231,349,198 bytes (220.6 MiB). Size changes when the pinned tools or runtime closure changes, so use the size printed by the build script as authoritative for later releases.
 
 ## On-device disc extraction
 
@@ -124,9 +147,21 @@ Extraction follows these checks:
 
 Keep enough free tablet storage for the extracted data in addition to the source image. Closing or force-stopping the app interrupts extraction; the next attempt removes stale staging data and preserves or restores the previous installed disc.
 
-On-device extraction supplies runtime data. It does not translate PowerPC game code. A playable local APK still requires the private host translation step below.
+On-device extraction supplies the private inputs. In the Builder edition, choose **Build private runtime** after extraction. Keep the tablet connected to power and leave at least 4 GiB of free internal storage. A foreground data-sync service keeps the work alive while the activity is backgrounded and exposes progress plus cancellation.
 
-## Build the private playable APK
+The device performs these steps in app-private storage:
+
+1. verifies that the extracted `main.dol` and `StaticR.rel` are present;
+2. expands the pinned compiler and reusable runtime SDKs;
+3. runs `translate-recursive`, `emit-base-manifest`, `generate-data-init`, and `emit-build-shards`;
+4. compiles the generated base shards for `aarch64-linux-android30` with at most four translation threads and one compiler process at a time;
+5. links and strips `libWiiCompiled.so` with 16 KiB ELF page alignment;
+6. hashes the result and dependencies into a private runtime-pack manifest, atomically activates it, and installs the bootstrap resources;
+7. enables the existing **Launch Mario Kart Wii** button.
+
+The ROM, extracted files, generated source, object files, logs, and final runtime remain under the application's private directories. Termux and a PC are not used by this device-side procedure. The PC toolchain described above is only needed by maintainers to produce the distributable Builder APK.
+
+## Legacy PC-built private runtime
 
 Use only a user-owned clean PAL `RMCP01` revision-0 image:
 
@@ -153,22 +188,23 @@ You can then use the on-device picker to extract the disc. The older ADB deploym
 
 ## Release procedure
 
-Use one commit per logical change. Before publishing:
+Use one commit per logical change. Before publishing the normal and Builder editions:
 
 ```powershell
 git status --short
 .\scripts\Build-Android.ps1
+.\scripts\Build-BuilderApk.ps1
 ```
 
 Then verify the candidate APK:
 
 ```powershell
-$apk = 'artifacts/WiiCompiled-PortLab-debug.apk'
+$apk = 'artifacts/WiiCompiled-Builder-debug.apk'
 Get-FileHash -Algorithm SHA256 -LiteralPath $apk
 & "$env:LOCALAPPDATA\Android\Sdk\build-tools\36.0.0\apksigner.bat" verify --verbose --print-certs $apk
 ```
 
-Inspect the ZIP entries and DEX before upload. The release candidate may contain `lib/arm64-v8a/libwiicompiled_probe.so` with NOD, but must not contain `libWiiCompiled.so`, `libRetroRewind.so`, a game activity, disc files, `.dol`, `.rel`, `.pul`, ROM formats, or driver libraries.
+`Build-BuilderApk.ps1` inspects the outer APK and rejects `libWiiCompiled.so`, `libRetroRewind.so`, disc binaries, and ROM formats. The Builder may contain the SDL game activity, `libwiicompiled_probe.so`, the Native AOT translator, compiler executables, compiler SDK archives, and reusable open-source libraries. Inspect nested SDK archives when changing their construction; neither archive may contain generated translation output or private game/mod inputs.
 
 Create the GitHub release only from committed and pushed source. Mark experimental versions as prereleases and attach both the renamed APK and a `.sha256` file. Download the published APK once and compare its SHA-256 with the pre-upload value.
 
@@ -201,3 +237,11 @@ Use `scripts/Build-Android.ps1`. It sets `GRADLE_USER_HOME` and `ANDROID_USER_HO
 ### APK certificate mismatch
 
 Stop. Do not uninstall the app, clear its data, or generate a replacement key. Restore the backed-up `private/signing/debug.keystore` whose public certificate matches the recorded SHA-256.
+
+### Builder reports that its payload is incomplete
+
+Run `Build-AndroidTranslator.ps1`, `Build-AndroidCompiler.ps1`, and `Build-AndroidRuntimeSdk.ps1`, then rebuild with `-PwithBuilder`. Do not substitute Termux executables: Termux packages embed that application's private prefix and are not a relocatable SDK for another Android package.
+
+### Builder stops for storage or Android kills it
+
+Free at least 4 GiB in internal app storage and connect power. Start the build again from the Play page. The current workspace is disposable; the previously activated runtime and extracted disc remain intact. Do not clear application data, because that removes the extracted disc, profiles, and private runtime.

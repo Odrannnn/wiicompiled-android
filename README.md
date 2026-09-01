@@ -23,6 +23,8 @@ On the Lenovo TB520FU (Android 16, Snapdragon SM8650, ARM64, 4 KiB pages):
 
 The Port Lab remains useful without a playable runtime. It uses Android's document picker and pinned NOD to extract a user-selected ISO, RVZ, WBFS, WIA, CISO, or GCZ directly into app-private storage. The extractor requires clean PAL `RMCP01` revision 0, validates Wii partition hashes while reading, verifies the pinned `main.dol` and `StaticR.rel`, and atomically preserves the previous extraction on failure. It requests no broad-storage permission and does not bundle game data.
 
+The Builder edition completes the rest on the tablet. It packages signed ARM64 Native AOT translator and Clang/LLD tools plus a game-free runtime SDK, translates the extracted binaries, compiles and links a private runtime, and activates it without Termux or a PC. The verified `0.3.0-alpha.1` APK is 220.6 MiB and requires at least 4 GiB free during the build. Generated code and the resulting runtime remain in app-private storage.
+
 ## Reproduce
 
 In PowerShell from the repository root:
@@ -32,6 +34,12 @@ In PowerShell from the repository root:
 .\scripts\Setup-HostTools.ps1
 .\scripts\Build-Android.ps1
 .\scripts\Install-Probe.ps1 -Serial '<adb serial>'
+```
+
+To build the self-contained edition distributed to Android users:
+
+```powershell
+.\scripts\Build-BuilderApk.ps1
 ```
 
 See [BUILDING.md](BUILDING.md) for the exact toolchain versions, Docker-based NOD build, private signing-key location, on-device extraction flow, release checklist, and failure recovery instructions.
@@ -74,7 +82,7 @@ Every imported profile receives a persistent executable-requirement manifest. It
 
 ## Current scope and remaining work
 
-The base game and Retro Rewind now boot and accept touch input on the target tablet. Warm races and heavy menus have been observed at approximately 60 FPS. Android background pipeline prewarming is limited to two workers so first-launch cache reconstruction does not starve gameplay; pipelines required by the current frame retain priority access to the worker pool. It remains an experimental port: extended races still need accuracy and ghost comparisons, lifecycle and suspend/resume need stress testing, audio latency needs tuning, NAND durability needs repeated interruption tests, and long-session thermals still need measurement. Online play is disabled in the Android configuration and has not been validated. The touch layout provides analog steering and the main GameCube controls, but still needs remapping and item gestures before it is a comfortable daily-use build.
+The base game and Retro Rewind now boot and accept touch input on the target tablet. Warm races and heavy menus have been observed at approximately 60 FPS. The complete base-runtime translation and compilation path is now available inside the Builder APK; its first full tablet build still needs long-duration timing, cancellation, thermal, and low-storage validation. Android background pipeline prewarming is limited to two workers so first-launch cache reconstruction does not starve gameplay; pipelines required by the current frame retain priority access to the worker pool. It remains an experimental port: extended races still need accuracy and ghost comparisons, lifecycle and suspend/resume need stress testing, audio latency needs tuning, NAND durability needs repeated interruption tests, and long-session thermals still need measurement. Online play is disabled in the Android configuration and has not been validated. The touch layout provides analog steering and the main GameCube controls, but still needs remapping and item gestures before it is a comfortable daily-use build.
 
 WheelWizard is a .NET 10 Avalonia desktop application. Its mod metadata, priority, launch-overlay behavior, GameBanana catalogue and ZIP downloads, staged Retro Rewind distribution updater, full-SZS conversion, U8/Yaz0 tagged-archive application, and Pulsar-compatible BRSAR file-ID composition now have Android implementations using document URIs and app-private storage. Broader settings services remain to be adapted. The desktop lifetime, executable launch model, Windows setup contract, app auto-updater, URL registration, and pop-up/window assumptions cannot be repackaged unchanged. Setup-EXE process calls need in-process/JNI installation services on Android.
 
