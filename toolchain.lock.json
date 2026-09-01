@@ -22,6 +22,8 @@
     "minSdk": 30,
     "ndk": "29.0.14206865",
     "cmake": "3.31.5",
-    "java": 17
+    "java": 17,
+    "nativeAotNdk": "25.1.8937393",
+    "nativeAotRuntime": "8.0.30"
   }
 }

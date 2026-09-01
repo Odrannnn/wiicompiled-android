@@ -1263,11 +1263,207 @@ index 0000000..e20523f
 +    ret
 +.size mkw_co_swap, .-mkw_co_swap
 +.section .note.GNU-stack,"",%progbits
+diff --git a/translator/src/Translator.Cli/Program.cs b/translator/src/Translator.Cli/Program.cs
+index c8f7fe4..9917884 100644
+--- a/translator/src/Translator.Cli/Program.cs
++++ b/translator/src/Translator.Cli/Program.cs
+@@ -7,7 +7,6 @@ using System.IO;
+ using System.Linq;
+ using System.Numerics;
+ using System.Reflection;
+-using System.Security.Cryptography;
+ using System.Text;
+ using System.Text.Json;
+ using System.Text.RegularExpressions;
+@@ -1885,7 +1884,7 @@ int RunTranslateModCore(string[] argsTail, string? outputDirectoryOverride)
+         baseManifest,
+         dvdOverlayRoots,
+         relocatedModuleImage,
+-        SHA1.HashData(selected.CodeBlob),
++        ChecksumUtilities.Sha1Bytes(selected.CodeBlob),
+         retroWfcLoweringPlan?.StaticPointers,
+         selected.CodeSize,
+         selected.BssSize,
+diff --git a/translator/src/Translator.Cli/TranslationProjectConfig.cs b/translator/src/Translator.Cli/TranslationProjectConfig.cs
+index 2deb7df..f338d97 100644
+--- a/translator/src/Translator.Cli/TranslationProjectConfig.cs
++++ b/translator/src/Translator.Cli/TranslationProjectConfig.cs
+@@ -1,6 +1,5 @@
+ using System.Globalization;
+-using YamlDotNet.Serialization;
+-using YamlDotNet.Serialization.NamingConventions;
++using YamlDotNet.RepresentationModel;
+ using Translator.Core.Loading;
+ 
+ namespace Translator.Cli.Configuration;
+@@ -47,11 +46,7 @@ internal sealed class TranslationProjectConfig
+             throw new FileNotFoundException("Translation project manifest not found.", sourcePath);
+         }
+ 
+-        var deserializer = new DeserializerBuilder()
+-            .WithNamingConvention(UnderscoredNamingConvention.Instance)
+-            .Build();
+-        var dto = deserializer.Deserialize<ProjectDto>(File.ReadAllText(sourcePath))
+-            ?? throw new InvalidDataException($"Translation project manifest is empty: {sourcePath}");
++        var dto = ParseProjectYaml(File.ReadAllText(sourcePath));
+         if (dto.SchemaVersion != 1)
+         {
+             throw new InvalidDataException($"Unsupported translation project schema_version {dto.SchemaVersion}; expected 1.");
+@@ -349,6 +344,105 @@ internal sealed class TranslationProjectConfig
+             : throw new InvalidDataException($"{field} exceeds Int32 range.");
+     }
+ 
++    // YamlDotNet's reflection mapper is unavailable in Native AOT. Parse this small, fixed
++    // project schema through its representation model so desktop and Android use identical data.
++    private static ProjectDto ParseProjectYaml(string text)
++    {
++        var yaml = new YamlStream();
++        yaml.Load(new StringReader(text));
++        if (yaml.Documents.Count != 1 || yaml.Documents[0].RootNode is not YamlMappingNode root)
++            throw new InvalidDataException("Translation project manifest must contain one mapping document.");
++        var profiles = new Dictionary<string, ProfileDto>(StringComparer.OrdinalIgnoreCase);
++        if (Mapping(root, "profiles") is { } profileNodes)
++            foreach (var item in profileNodes.Children)
++            {
++                var name = Scalar(item.Key) ?? throw new InvalidDataException("Profile name must be a scalar.");
++                var profile = RequireMapping(item.Value, $"profiles.{name}");
++                profiles.Add(name, new ProfileDto
++                {
++                    Enabled = Boolean(profile, "enabled"), CodePul = Value(profile, "code_pul"),
++                    ModRoot = Value(profile, "mod_root"), Region = Value(profile, "region"),
++                    ModuleGuestBase = Value(profile, "module_guest_base"),
++                    ModuleLinkBase = Value(profile, "module_link_base"), Output = Value(profile, "output"),
++                    EnableRetroWfc = Boolean(profile, "enable_retro_wfc"),
++                    RetroWfcPayload = Value(profile, "retro_wfc_payload"),
++                    RetroWfcLegacyBootstrapHook = Value(profile, "retro_wfc_legacy_bootstrap_hook"),
++                    RequiresGameId = Value(profile, "requires_game_id"),
++                    RequiresDolSha256 = Value(profile, "requires_dol_sha256"),
++                    Riivolution = ParseRiivolution(Mapping(profile, "riivolution"))
++                });
++            }
++        var project = Mapping(root, "project"); var memory = Mapping(root, "memory");
++        var inputs = Mapping(root, "inputs"); var translation = Mapping(root, "translation");
++        var runtime = Mapping(root, "runtime"); var output = Mapping(root, "output");
++        var dol = Mapping(inputs, "dol"); var rel = Mapping(inputs, "rel");
++        return new ProjectDto
++        {
++            SchemaVersion = Int32Value(root, "schema_version"), WorkspaceRoot = Value(root, "workspace_root"),
++            Project = project is null ? null : new IdentityDto {
++                Id = Value(project, "id"), DisplayName = Value(project, "display_name"),
++                GameId = Value(project, "game_id"), Region = Value(project, "region"),
++                BaseManifestFormat = Value(project, "base_manifest_format"), BaseManifestStem = Value(project, "base_manifest_stem") },
++            Memory = memory is null ? null : new MemoryDto {
++                Base = Value(memory, "base"), Size = Value(memory, "size"),
++                SdaBase = Value(memory, "sda_base"), Sda2Base = Value(memory, "sda2_base") },
++            Inputs = inputs is null ? null : new InputsDto {
++                Dol = dol is null ? null : new BinaryInputDto { Path = Value(dol, "path") ?? "", Sha256 = Value(dol, "sha256") },
++                Rel = rel is null ? null : new RelInputDto { Path = Value(rel, "path") ?? "", Sha256 = Value(rel, "sha256"), LoadAddress = Value(rel, "load_address") } },
++            Translation = translation is null ? null : new TranslationDto {
++                EntryPoints = Values(translation, "entry_points"),
++                FunctionMap = Mapping(translation, "function_map") is { } map ? new FunctionMapDto { Path = Value(map, "path") } : null,
++                AllowUnsupportedInstructions = Boolean(translation, "allow_unsupported_instructions") },
++            Runtime = runtime is null ? null : new RuntimeDto {
++                NativeAbiDirectories = Values(runtime, "native_abi_directories"),
++                NativeRegistrationRoot = Value(runtime, "native_registration_root") },
++            Output = output is null ? null : new OutputDto {
++                Root = Value(output, "root"), Functions = Value(output, "functions"),
++                RuntimeConfig = Value(output, "runtime_config"), DataInitializer = Value(output, "data_initializer"),
++                BaseManifest = Value(output, "base_manifest") },
++            Profiles = profiles
++        };
++    }
++
++    private static RiivolutionDto? ParseRiivolution(YamlMappingNode? node)
++    {
++        if (node is null) return null;
++        var options = new List<RiivolutionOptionDto>();
++        if (Node(node, "options") is YamlSequenceNode sequence)
++            foreach (var item in sequence.Children)
++            {
++                var option = RequireMapping(item, "riivolution option");
++                options.Add(new RiivolutionOptionDto { Section = Value(option, "section"),
++                    Option = Value(option, "option"), Choice = Value(option, "choice") });
++            }
++        return new RiivolutionDto { Xml = Value(node, "xml"), Options = options };
++    }
++    private static YamlNode? Node(YamlMappingNode? map, string key) => map?.Children
++        .FirstOrDefault(item => string.Equals(Scalar(item.Key), key, StringComparison.Ordinal)).Value;
++    private static YamlMappingNode? Mapping(YamlMappingNode? map, string key) => Node(map, key) switch
++    {
++        null => null,
++        YamlMappingNode value => value,
++        _ => throw new InvalidDataException($"{key} must be a mapping.")
++    };
++    private static YamlMappingNode RequireMapping(YamlNode node, string field) => node as YamlMappingNode
++        ?? throw new InvalidDataException($"{field} must be a mapping.");
++    private static string? Scalar(YamlNode? node) => node is YamlScalarNode scalar ? scalar.Value : null;
++    private static string? Value(YamlMappingNode? map, string key) => Scalar(Node(map, key));
++    private static bool? Boolean(YamlMappingNode map, string key) => Value(map, key) is { } value
++        ? bool.TryParse(value, out var result) ? result : throw new InvalidDataException($"{key} must be true or false.")
++        : null;
++    private static int Int32Value(YamlMappingNode map, string key) => Value(map, key) is { } value
++        && int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var result)
++            ? result : throw new InvalidDataException($"{key} must be an integer.");
++    private static List<string>? Values(YamlMappingNode map, string key) => Node(map, key) switch
++    {
++        null => null,
++        YamlSequenceNode sequence => sequence.Children.Select(item => Scalar(item)
++            ?? throw new InvalidDataException($"{key} entries must be scalar values.")).ToList(),
++        _ => throw new InvalidDataException($"{key} must be a sequence.")
++    };
++
+     private sealed class ProjectDto
+     {
+         public int SchemaVersion { get; init; }
+diff --git a/translator/src/Translator.Core/Build/TranslationSourceBundle.cs b/translator/src/Translator.Core/Build/TranslationSourceBundle.cs
+index 6a18629..b59602e 100644
+--- a/translator/src/Translator.Core/Build/TranslationSourceBundle.cs
++++ b/translator/src/Translator.Core/Build/TranslationSourceBundle.cs
+@@ -1,4 +1,3 @@
+-using System.Security.Cryptography;
+ using System.Text;
+ using Translator.Core.Loading;
+ 
+@@ -71,7 +70,7 @@ public sealed class TranslationSourceBundle
+                 writer.Write(pathBytes.Length);
+                 writer.Write(pathBytes);
+                 writer.Write(sourceBytes.Length);
+-                writer.Write(SHA256.HashData(sourceBytes));
++                writer.Write(ChecksumUtilities.Sha256Bytes(sourceBytes));
+                 writer.Write(sourceBytes);
+             }
+         }
+@@ -98,7 +97,7 @@ public sealed class TranslationSourceBundle
+             var hash = reader.ReadBytes(32);
+             if (sourceLength < 0) throw new InvalidDataException("Negative translation source length.");
+             var sourceBytes = reader.ReadBytes(sourceLength);
+-            if (sourceBytes.Length != sourceLength || !SHA256.HashData(sourceBytes).SequenceEqual(hash))
++            if (sourceBytes.Length != sourceLength || !ChecksumUtilities.Sha256Bytes(sourceBytes).SequenceEqual(hash))
+                 throw new InvalidDataException($"Translation source 0x{address:X8} is truncated or corrupt.");
+             if (!identities.Add((address, virtualPath)))
+                 throw new InvalidDataException($"Duplicate translation source 0x{address:X8} '{virtualPath}'.");
+@@ -188,7 +187,7 @@ public sealed class TranslationSourceBundleWriter : IDisposable
+         _writer.Write(pathBytes.Length);
+         _writer.Write(pathBytes);
+         _writer.Write(sourceBytes.Length);
+-        _writer.Write(SHA256.HashData(sourceBytes));
++        _writer.Write(ChecksumUtilities.Sha256Bytes(sourceBytes));
+         _writer.Write(sourceBytes);
+         _previous = (entry.EntryPoint, virtualPath);
+         _written++;
 diff --git a/translator/src/Translator.Core/IO/AssemblyBlobWriter.cs b/translator/src/Translator.Core/IO/AssemblyBlobWriter.cs
-index 3a295f0..7f20ed6 100644
+index 3a295f0..920c0af 100644
 --- a/translator/src/Translator.Core/IO/AssemblyBlobWriter.cs
 +++ b/translator/src/Translator.Core/IO/AssemblyBlobWriter.cs
-@@ -22,14 +22,13 @@ internal static class AssemblyBlobWriter
+@@ -1,7 +1,6 @@
+ using System;
+ using System.Collections.Generic;
+ using System.IO;
+-using System.Security.Cryptography;
+ using System.Text;
+ using Translator.Core.Loading;
+ 
+@@ -22,14 +21,13 @@ internal static class AssemblyBlobWriter
          var expectedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
          var assembly = new StringBuilder();
          foreach (var header in headerLines) assembly.AppendLine(header);
@@ -1289,7 +1485,7 @@ index 3a295f0..7f20ed6 100644
          assembly.AppendLine();
  
          foreach (var blob in blobs)
-@@ -51,18 +50,12 @@ internal static class AssemblyBlobWriter
+@@ -51,18 +49,12 @@ internal static class AssemblyBlobWriter
          {
              if (!expectedFiles.Contains(Path.GetFullPath(stalePath))) File.Delete(stalePath);
          }
@@ -1312,3 +1508,140 @@ index 3a295f0..7f20ed6 100644
      private static string SanitizeAssemblyPath(string path) => Path.GetFullPath(path).Replace('\\', '/');
  }
 +
+diff --git a/translator/src/Translator.Core/Loading/ChecksumUtilities.cs b/translator/src/Translator.Core/Loading/ChecksumUtilities.cs
+index 5865714..4b2da11 100644
+--- a/translator/src/Translator.Core/Loading/ChecksumUtilities.cs
++++ b/translator/src/Translator.Core/Loading/ChecksumUtilities.cs
+@@ -1,4 +1,5 @@
+-using System.Security.Cryptography;
++using System.Buffers.Binary;
++using System.Numerics;
+ 
+ namespace Translator.Core.Loading;
+ 
+@@ -9,7 +10,7 @@ namespace Translator.Core.Loading;
+ public static class ChecksumUtilities
+ {
+     public static string Sha256Hex(ReadOnlySpan<byte> data) =>
+-        Convert.ToHexString(SHA256.HashData(data)).ToLowerInvariant();
++        ToHex(Sha256Bytes(data));
+ 
+     public static string Sha256Hex(byte[] data) =>
+         Sha256Hex((ReadOnlySpan<byte>)data);
+@@ -22,6 +23,105 @@ public static class ChecksumUtilities
+     public static string Sha256HexOfFile(string path)
+     {
+         using var stream = File.OpenRead(path);
+-        return ToHex(SHA256.HashData(stream));
++        return ToHex(Sha256Bytes(stream));
++    }
++
++    public static byte[] Sha256Bytes(ReadOnlySpan<byte> data)
++    {
++        using var stream = new MemoryStream(data.ToArray(), writable: false);
++        return Sha256Bytes(stream);
++    }
++
++    // Small managed implementation keeps the Native AOT translator independent of libssl.
++    // The state, schedule and constants are the SHA-256 definition from FIPS 180-4.
++    public static byte[] Sha256Bytes(Stream stream)
++    {
++        uint[] state = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
++            0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
++        var block = new byte[64]; long length = 0; int buffered = 0;
++        while (true)
++        {
++            var read = stream.Read(block, buffered, block.Length - buffered);
++            if (read == 0) break;
++            buffered += read; length += read;
++            if (buffered == block.Length) { Compress(state, block); buffered = 0; }
++        }
++        block[buffered++] = 0x80;
++        if (buffered > 56) { Array.Clear(block, buffered, block.Length - buffered); Compress(state, block); buffered = 0; }
++        Array.Clear(block, buffered, 56 - buffered);
++        BinaryPrimitives.WriteUInt64BigEndian(block.AsSpan(56), checked((ulong)length * 8));
++        Compress(state, block);
++        var result = new byte[32];
++        for (var index = 0; index < state.Length; index++)
++            BinaryPrimitives.WriteUInt32BigEndian(result.AsSpan(index * 4), state[index]);
++        return result;
++    }
++
++    private static void Compress(uint[] state, ReadOnlySpan<byte> block)
++    {
++        ReadOnlySpan<uint> constants = [
++            0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
++            0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
++            0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
++            0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
++            0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
++            0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
++            0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
++            0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
++        Span<uint> words = stackalloc uint[64];
++        for (var i = 0; i < 16; i++) words[i] = BinaryPrimitives.ReadUInt32BigEndian(block.Slice(i * 4, 4));
++        for (var i = 16; i < 64; i++)
++        {
++            var x = words[i - 15]; var y = words[i - 2];
++            var s0 = BitOperations.RotateRight(x, 7) ^ BitOperations.RotateRight(x, 18) ^ (x >> 3);
++            var s1 = BitOperations.RotateRight(y, 17) ^ BitOperations.RotateRight(y, 19) ^ (y >> 10);
++            words[i] = unchecked(words[i - 16] + s0 + words[i - 7] + s1);
++        }
++        var a=state[0]; var b=state[1]; var c=state[2]; var d=state[3];
++        var e=state[4]; var f=state[5]; var g=state[6]; var h=state[7];
++        for (var i = 0; i < 64; i++)
++        {
++            var s1 = BitOperations.RotateRight(e, 6) ^ BitOperations.RotateRight(e, 11) ^ BitOperations.RotateRight(e, 25);
++            var choose = (e & f) ^ (~e & g);
++            var t1 = unchecked(h + s1 + choose + constants[i] + words[i]);
++            var s0 = BitOperations.RotateRight(a, 2) ^ BitOperations.RotateRight(a, 13) ^ BitOperations.RotateRight(a, 22);
++            var majority = (a & b) ^ (a & c) ^ (b & c);
++            var t2 = unchecked(s0 + majority);
++            h=g; g=f; f=e; e=unchecked(d+t1); d=c; c=b; b=a; a=unchecked(t1+t2);
++        }
++        state[0]=unchecked(state[0]+a); state[1]=unchecked(state[1]+b);
++        state[2]=unchecked(state[2]+c); state[3]=unchecked(state[3]+d);
++        state[4]=unchecked(state[4]+e); state[5]=unchecked(state[5]+f);
++        state[6]=unchecked(state[6]+g); state[7]=unchecked(state[7]+h);
++    }
++
++    public static byte[] Sha1Bytes(ReadOnlySpan<byte> data)
++    {
++        uint[] state = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0];
++        var paddedLength = checked(((data.Length + 9 + 63) / 64) * 64);
++        var padded = new byte[paddedLength]; data.CopyTo(padded); padded[data.Length] = 0x80;
++        BinaryPrimitives.WriteUInt64BigEndian(padded.AsSpan(paddedLength - 8), checked((ulong)data.Length) * 8);
++        Span<uint> words = stackalloc uint[80];
++        for (var offset = 0; offset < padded.Length; offset += 64)
++        {
++            for (var i = 0; i < 16; i++) words[i] = BinaryPrimitives.ReadUInt32BigEndian(padded.AsSpan(offset + i * 4, 4));
++            for (var i = 16; i < 80; i++) words[i] = BitOperations.RotateLeft(words[i-3] ^ words[i-8] ^ words[i-14] ^ words[i-16], 1);
++            var a=state[0]; var b=state[1]; var c=state[2]; var d=state[3]; var e=state[4];
++            for (var i = 0; i < 80; i++)
++            {
++                uint f, k;
++                if (i < 20) { f=(b&c)|(~b&d); k=0x5a827999; }
++                else if (i < 40) { f=b^c^d; k=0x6ed9eba1; }
++                else if (i < 60) { f=(b&c)|(b&d)|(c&d); k=0x8f1bbcdc; }
++                else { f=b^c^d; k=0xca62c1d6; }
++                var temp=unchecked(BitOperations.RotateLeft(a,5)+f+e+k+words[i]);
++                e=d; d=c; c=BitOperations.RotateLeft(b,30); b=a; a=temp;
++            }
++            state[0]=unchecked(state[0]+a); state[1]=unchecked(state[1]+b);
++            state[2]=unchecked(state[2]+c); state[3]=unchecked(state[3]+d); state[4]=unchecked(state[4]+e);
++        }
++        var result = new byte[20];
++        for (var i=0; i<state.Length; i++) BinaryPrimitives.WriteUInt32BigEndian(result.AsSpan(i*4), state[i]);
++        return result;
+     }
+ }
+diff --git a/translator/src/Translator.Core/Mods/OverlayFunctionBuilder.cs b/translator/src/Translator.Core/Mods/OverlayFunctionBuilder.cs
+index 26a7758..399e348 100644
+--- a/translator/src/Translator.Core/Mods/OverlayFunctionBuilder.cs
++++ b/translator/src/Translator.Core/Mods/OverlayFunctionBuilder.cs
+@@ -1,5 +1,4 @@
+ using System.Buffers.Binary;
+-using System.Security.Cryptography;
+ using System.Text.Json;
+ using Translator.Core.Parsing.Kamek;
+ using Translator.Core.Mods.Mkwii;
