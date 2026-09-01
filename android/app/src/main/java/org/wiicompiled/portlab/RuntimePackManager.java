@@ -86,13 +86,20 @@ final class RuntimePackManager {
     }
 
     static String installBuilt(Context context, File gameLibrary, File sdkRoot) throws IOException {
+        return installBuilt(context, gameLibrary, null, sdkRoot);
+    }
+
+    static String installBuilt(Context context, File gameLibrary, File retroLibrary, File sdkRoot) throws IOException {
         if (!gameLibrary.isFile()) throw new IOException("The Android build produced no game library");
+        if (retroLibrary != null && !retroLibrary.isFile()) throw new IOException("The Android build produced no Retro Rewind library");
         File root = root(context), staging = new File(root, "building-" + System.currentTimeMillis());
         if (!staging.mkdirs()) throw new IOException("Cannot create private runtime staging directory");
         try {
             File lib = new File(staging, "lib/arm64-v8a");
             if (!lib.mkdirs()) throw new IOException("Cannot create runtime library directory");
             Files.copy(gameLibrary.toPath(), new File(lib, "libWiiCompiled.so").toPath());
+            if (retroLibrary != null)
+                Files.copy(retroLibrary.toPath(), new File(lib, "libRetroRewind.so").toPath());
             File nativeLib = new File(context.getApplicationInfo().nativeLibraryDir);
             for (String name : LOAD_ORDER) {
                 File source = new File(nativeLib, name);
