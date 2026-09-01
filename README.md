@@ -21,7 +21,7 @@ On the Lenovo TB520FU (Android 16, Snapdragon SM8650, ARM64, 4 KiB pages):
 - App-managed NAND can create and reopen Mario Kart's save data, including the required FaceLib database and offline WiiConnect24 scheduler services.
 - A touch GameCube pad supplies D-pad, A, B, and Start input; Mario Kart passes controller detection and reaches the main menu without a physical controller.
 
-The Port Lab remains useful without any game image. It uses Android's document picker, reads only a selected document's first 32 bytes for a conservative header check, and does not request network or broad-storage permissions.
+The Port Lab remains useful without a playable runtime. It uses Android's document picker and pinned NOD to extract a user-selected ISO, RVZ, WBFS, WIA, CISO, or GCZ directly into app-private storage. The extractor requires clean PAL `RMCP01` revision 0, validates Wii partition hashes while reading, verifies the pinned `main.dol` and `StaticR.rel`, and atomically preserves the previous extraction on failure. It requests no broad-storage permission and does not bundle game data.
 
 ## Reproduce
 
@@ -33,6 +33,8 @@ In PowerShell from the repository root:
 .\scripts\Build-Android.ps1
 .\scripts\Install-Probe.ps1 -Serial '<adb serial>'
 ```
+
+See [BUILDING.md](BUILDING.md) for the exact toolchain versions, Docker-based NOD build, private signing-key location, on-device extraction flow, release checklist, and failure recovery instructions.
 
 To create a private local game build:
 
@@ -76,4 +78,4 @@ The base game and Retro Rewind now boot and accept touch input on the target tab
 
 WheelWizard is a .NET 10 Avalonia desktop application. Its mod metadata, priority, launch-overlay behavior, GameBanana catalogue and ZIP downloads, staged Retro Rewind distribution updater, full-SZS conversion, U8/Yaz0 tagged-archive application, and Pulsar-compatible BRSAR file-ID composition now have Android implementations using document URIs and app-private storage. Broader settings services remain to be adapted. The desktop lifetime, executable launch model, Windows setup contract, app auto-updater, URL registration, and pop-up/window assumptions cannot be repackaged unchanged. Setup-EXE process calls need in-process/JNI installation services on Android.
 
-Upstream locks are in `upstream.lock.json`; tool downloads and hashes are in `toolchain.lock.json`. Patches are exported under `patches/`; never commit the ignored upstream checkouts or private artifacts.
+Upstream locks are in `upstream.lock.json`; tool downloads and hashes are in `toolchain.lock.json`. Patches are exported under `patches/`; never commit the ignored upstream checkouts or private artifacts. The full reproducible workflow is recorded in `BUILDING.md`.
