@@ -151,7 +151,7 @@ index 86649c9..2468b10 100644
 +}
  #endif
 diff --git a/runtime/CMakeLists.txt b/runtime/CMakeLists.txt
-index 642de5f..57a0cad 100644
+index 642de5f..7ef1c7d 100644
 --- a/runtime/CMakeLists.txt
 +++ b/runtime/CMakeLists.txt
 @@ -1,8 +1,8 @@
@@ -181,7 +181,16 @@ index 642de5f..57a0cad 100644
  
  # Declared before the vendored libraries so the third-party block below can
  # branch on it and so cmake/NativePrebuilt.cmake is included after the names it
-@@ -59,12 +67,7 @@ set_target_properties(mkw_pugixml PROPERTIES UNITY_BUILD OFF)
+@@ -32,6 +40,8 @@ set(MKW_NATIVE_PREBUILT_DIR "" CACHE PATH
+ # package can be harvested from it.
+ set(MKW_NATIVE_PREBUILT_EXPORT_DIR "" CACHE PATH
+     "Maintainer-only: write a description of the configured aurora build here")
++set(MKW_BUILD_ANDROID_RUNTIME_SDK OFF CACHE BOOL
++    "Build the game-free static Android runtime support archive")
+ 
+ # The two Crypto++ configuration macros are load-bearing for ABI: they shape the
+ # structs and inline code the headers generate, so a first-party TU including
+@@ -59,12 +69,7 @@ set_target_properties(mkw_pugixml PROPERTIES UNITY_BUILD OFF)
  # (__amd64__/__i386__/__arm__/__aarch64__/etc.) only ever selects amd64.c for this project's
  # x86_64-only target (see the platform/arch check above). Windows keeps using native Fibers
  # untouched, so this target is never built there.
@@ -195,7 +204,7 @@ index 642de5f..57a0cad 100644
  
  # Runtime configuration is real TOML, parsed by toml11 rather than a project-
  # specific line parser. Keep it header-only and vendored so disconnected release
-@@ -98,6 +101,11 @@ if(NOT MKW_NATIVE_PREBUILT_DIR)
+@@ -98,6 +103,11 @@ if(NOT MKW_NATIVE_PREBUILT_DIR)
      target_compile_definitions(mkw_cryptopp PUBLIC ${MKW_CRYPTOPP_INTERFACE_DEFINITIONS})
      target_compile_options(mkw_cryptopp PRIVATE -w)
      set_target_properties(mkw_cryptopp PROPERTIES UNITY_BUILD OFF)
@@ -207,7 +216,7 @@ index 642de5f..57a0cad 100644
  endif()
  
  set(MKW_TRANSLATED_COMPILE_JOBS 0 CACHE STRING
-@@ -113,6 +121,16 @@ set(MKW_CPPWINRT_INCLUDE_DIR "" CACHE PATH "Optional self-contained C++/WinRT in
+@@ -113,6 +123,16 @@ set(MKW_CPPWINRT_INCLUDE_DIR "" CACHE PATH "Optional self-contained C++/WinRT in
  # as before.
  set(MKW_AURORA_DIR "${CMAKE_CURRENT_LIST_DIR}/../aurora-main")
  
@@ -224,7 +233,30 @@ index 642de5f..57a0cad 100644
  # The translator's explicit float casts are PPC single-precision rounding points.
  # Fast-math may erase them and change guest-visible integer conversions.
  set(MKW_TRANSLATED_PPC_FP_OPTIONS -fno-fast-math -ffp-contract=off)
-@@ -257,3 +275,6 @@ message(STATUS
+@@ -243,17 +263,22 @@ list(REMOVE_ITEM SOURCES ${MKW_BASE_PRODUCT_SOURCE} ${MKW_RETRO_REWIND_PRODUCT_S
+ set(MKW_TRANSLATED_SHARD_MANIFEST
+     "${CMAKE_CURRENT_LIST_DIR}/../generated/build_shards/shards.cmake"
+     CACHE FILEPATH "Translator-owned aggregate shard manifest")
+-if(NOT EXISTS "${MKW_TRANSLATED_SHARD_MANIFEST}")
++if(NOT MKW_BUILD_ANDROID_RUNTIME_SDK AND NOT EXISTS "${MKW_TRANSLATED_SHARD_MANIFEST}")
+     message(FATAL_ERROR
+         "Missing translator-owned shard manifest: ${MKW_TRANSLATED_SHARD_MANIFEST}. "
+         "Run Translator.Cli emit-build-shards first; see translator/README.md.")
+ endif()
+-include("${MKW_TRANSLATED_SHARD_MANIFEST}")
+-set(MKW_HAVE_RETRO_REWIND ${MKW_HAVE_RETRO_REWIND_SHARDS})
+-message(STATUS
+-    "Translator graph: ${MKW_SHARED_BASE_FUNCTION_COUNT}/${MKW_BASE_FUNCTION_COUNT} base functions shared; "
+-    "${MKW_PROFILE_SENSITIVE_CALLER_COUNT} profile-sensitive callers; "
+-    "${MKW_RETRO_REWIND_FUNCTION_COUNT} Retro Rewind functions")
++if(NOT MKW_BUILD_ANDROID_RUNTIME_SDK)
++    include("${MKW_TRANSLATED_SHARD_MANIFEST}")
++    set(MKW_HAVE_RETRO_REWIND ${MKW_HAVE_RETRO_REWIND_SHARDS})
++    message(STATUS
++        "Translator graph: ${MKW_SHARED_BASE_FUNCTION_COUNT}/${MKW_BASE_FUNCTION_COUNT} base functions shared; "
++        "${MKW_PROFILE_SENSITIVE_CALLER_COUNT} profile-sensitive callers; "
++        "${MKW_RETRO_REWIND_FUNCTION_COUNT} Retro Rewind functions")
++endif()
  
  set(MKW_RUNTIME_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}")
  include("${CMAKE_CURRENT_LIST_DIR}/cmake/PublicProducts.cmake")
@@ -253,7 +285,7 @@ index 0000000..7170c12
 +    set_target_properties(mkw_libco PROPERTIES UNITY_BUILD OFF POSITION_INDEPENDENT_CODE ON)
 +endif()
 diff --git a/runtime/cmake/PublicProducts.cmake b/runtime/cmake/PublicProducts.cmake
-index 1987cd5..4c3a34d 100644
+index 1987cd5..21d1dad 100644
 --- a/runtime/cmake/PublicProducts.cmake
 +++ b/runtime/cmake/PublicProducts.cmake
 @@ -1,4 +1,4 @@
@@ -262,7 +294,33 @@ index 1987cd5..4c3a34d 100644
  #
  # The translator owns the translated build graph. Mario Kart's profile-neutral
  # functions are compiled once into mkw_base_shared; only callers whose direct
-@@ -77,6 +77,9 @@ target_compile_definitions(mkw_runtime_common PRIVATE
+@@ -6,19 +6,22 @@
+ 
+ set(DATA_INIT_FILE "${MKW_RUNTIME_SOURCE_DIR}/../generated/data_sections_init.cpp")
+ set(DATA_INIT_BLOB_ASM "${MKW_RUNTIME_SOURCE_DIR}/../generated/data_sections_init_blobs.S")
+-if(EXISTS "${DATA_INIT_FILE}")
++if(NOT MKW_BUILD_ANDROID_RUNTIME_SDK AND EXISTS "${DATA_INIT_FILE}")
+     list(APPEND SOURCES "${DATA_INIT_FILE}")
+ endif()
+ # Crash-report symbolization table emitted by generate-data-init. The stub
+ # (deliberately outside the globbed src/ tree so it is never picked up twice)
+ # keeps link succeeding when the generated table has not been produced yet.
+ set(GUEST_SYMBOL_TABLE_FILE "${MKW_RUNTIME_SOURCE_DIR}/../generated/guest_symbol_table.cpp")
+-if(EXISTS "${GUEST_SYMBOL_TABLE_FILE}")
++if(MKW_BUILD_ANDROID_RUNTIME_SDK)
++    # The SDK is public and reusable. Game-derived initializers and symbol data
++    # are compiled on the owner's Android device and linked with this archive.
++elseif(EXISTS "${GUEST_SYMBOL_TABLE_FILE}")
+     list(APPEND SOURCES "${GUEST_SYMBOL_TABLE_FILE}")
+ else()
+     list(APPEND SOURCES "${MKW_RUNTIME_SOURCE_DIR}/cmake/guest_symbol_table_stub.cpp")
+ endif()
+-if(EXISTS "${DATA_INIT_BLOB_ASM}")
++if(NOT MKW_BUILD_ANDROID_RUNTIME_SDK AND EXISTS "${DATA_INIT_BLOB_ASM}")
+     enable_language(ASM)
+     set_source_files_properties("${DATA_INIT_BLOB_ASM}" PROPERTIES LANGUAGE ASM SKIP_UNITY_BUILD_INCLUSION ON)
+     list(APPEND SOURCES "${DATA_INIT_BLOB_ASM}")
+@@ -77,6 +80,9 @@ target_compile_definitions(mkw_runtime_common PRIVATE
  target_link_libraries(mkw_runtime_common PRIVATE
      aurora::gx aurora::pad aurora::si aurora::vi aurora::mtx)
  target_link_libraries(mkw_runtime_common PRIVATE mkw::pugixml mkw::toml11 mkw::cryptopp)
@@ -272,7 +330,40 @@ index 1987cd5..4c3a34d 100644
  if(WIN32)
      target_link_libraries(mkw_runtime_common PRIVATE shell32 windowsapp)
  else()
-@@ -277,7 +280,13 @@ function(mkw_configure_product target)
+@@ -138,6 +144,32 @@ target_compile_features(mkw_cpu_baseline PRIVATE cxx_std_17)
+ set_target_properties(mkw_cpu_baseline PROPERTIES UNITY_BUILD OFF)
+ target_compile_options(mkw_cpu_baseline PRIVATE -w)
+ 
++if(MKW_BUILD_ANDROID_RUNTIME_SDK)
++    target_include_directories(mkw_runtime_common BEFORE PRIVATE "${MKW_RUNTIME_SOURCE_DIR}/sdk")
++    add_library(mkw_android_runtime_support STATIC
++        "${MKW_BASE_PRODUCT_SOURCE}"
++        $<TARGET_OBJECTS:mkw_runtime_common>
++        $<TARGET_OBJECTS:mkw_cpu_baseline>)
++    mkw_configure_object_target(mkw_android_runtime_support)
++    target_compile_features(mkw_android_runtime_support PRIVATE cxx_std_20)
++    target_compile_definitions(mkw_android_runtime_support PRIVATE
++        SDL_MAIN_HANDLED _DISABLE_STRING_ANNOTATION _DISABLE_VECTOR_ANNOTATION)
++    mkw_apply_common_compile_options(mkw_android_runtime_support)
++    set_target_properties(mkw_android_runtime_support PROPERTIES
++        OUTPUT_NAME wiicompiled_runtime_support)
++    target_link_libraries(mkw_android_runtime_support PUBLIC
++        aurora::gx aurora::pad aurora::si aurora::vi aurora::mtx
++        mkw::pugixml mkw::toml11 mkw::cryptopp mkw::libco adrenotools log ${CMAKE_DL_LIBS})
++    add_library(mkw_android_runtime_link_probe SHARED EXCLUDE_FROM_ALL
++        "${MKW_RUNTIME_SOURCE_DIR}/sdk/link_probe.cpp")
++    target_link_libraries(mkw_android_runtime_link_probe PRIVATE mkw_android_runtime_support)
++    target_link_options(mkw_android_runtime_link_probe PRIVATE "-Wl,-z,max-page-size=16384")
++    target_compile_options(mkw_runtime_common PRIVATE -march=armv8-a)
++    target_compile_options(mkw_cpu_baseline PRIVATE -march=armv8-a)
++    target_compile_options(mkw_android_runtime_support PRIVATE -march=armv8-a)
++    return()
++endif()
++
+ if(NOT MKW_BASE_COMMON_SHARDS)
+     message(FATAL_ERROR "Translator build graph contains no shared base shards")
+ endif()
+@@ -277,7 +309,13 @@ function(mkw_configure_product target)
          "$<TARGET_FILE_DIR:${target}>/initial_pipeline_cache.db")
  endfunction()
  
@@ -287,7 +378,7 @@ index 1987cd5..4c3a34d 100644
  mkw_configure_product(WiiCompiled)
  target_precompile_headers(WiiCompiled PRIVATE
      "${MKW_RUNTIME_SOURCE_DIR}/include/mkw_pch.h")
-@@ -286,7 +295,13 @@ if(TARGET mkw_base_sensitive)
+@@ -286,7 +324,13 @@ if(TARGET mkw_base_sensitive)
  endif()
  
  if(MKW_HAVE_RETRO_REWIND)
@@ -302,7 +393,7 @@ index 1987cd5..4c3a34d 100644
      mkw_configure_product(RetroRewind)
      target_precompile_headers(RetroRewind REUSE_FROM WiiCompiled)
      if(TARGET mkw_retro_sensitive)
-@@ -312,7 +327,11 @@ endif()
+@@ -312,16 +356,21 @@ endif()
  if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64)$")
      set(MKW_BASELINE_ARCH_FLAG -march=x86-64-v3)
  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
@@ -315,7 +406,13 @@ index 1987cd5..4c3a34d 100644
  else()
      set(MKW_BASELINE_ARCH_FLAG "")
  endif()
-@@ -325,3 +344,4 @@ foreach(target IN LISTS MKW_ALL_BUILD_TARGETS)
+ 
+ set(MKW_ALL_BUILD_TARGETS
+     mkw_runtime_common mkw_base_shared mkw_base_sensitive mkw_retro_sensitive
+-    mkw_retro_rewind_functions WiiCompiled RetroRewind)
++    mkw_retro_rewind_functions mkw_android_runtime_support WiiCompiled RetroRewind)
+ foreach(target IN LISTS MKW_ALL_BUILD_TARGETS)
+     if(TARGET ${target} AND MKW_BASELINE_ARCH_FLAG)
          target_compile_options(${target} PRIVATE ${MKW_BASELINE_ARCH_FLAG})
      endif()
  endforeach()
@@ -421,6 +518,27 @@ index c7a93c4..f7c90ed 100644
  
  } // namespace RuntimeConfigFile
 +
+diff --git a/runtime/sdk/generated/RuntimeConfig.h b/runtime/sdk/generated/RuntimeConfig.h
+new file mode 100644
+index 0000000..f7e3951
+--- /dev/null
++++ b/runtime/sdk/generated/RuntimeConfig.h
+@@ -0,0 +1,7 @@
++// Public RMCP01 runtime configuration used by the reusable Android SDK.
++#pragma once
++#include <cstdint>
++namespace RuntimeConfig {
++constexpr uint32_t SDA1_BASE = 0x8038CC00u;
++constexpr uint32_t SDA2_BASE = 0x8038EFA0u;
++}
+diff --git a/runtime/sdk/link_probe.cpp b/runtime/sdk/link_probe.cpp
+new file mode 100644
+index 0000000..b9a0803
+--- /dev/null
++++ b/runtime/sdk/link_probe.cpp
+@@ -0,0 +1,2 @@
++// Generates the resolved Android runtime SDK link closure in build.ninja.
++extern "C" int wiicompiled_android_runtime_sdk_probe() { return 0; }
 diff --git a/runtime/src/android_entry.cpp b/runtime/src/android_entry.cpp
 new file mode 100644
 index 0000000..2499abd
