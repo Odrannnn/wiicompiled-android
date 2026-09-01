@@ -65,10 +65,10 @@ final class AndroidBuilderManager {
 
         File root = new File(context.getFilesDir(), "android-builder");
         File sdk = new File(root, "sdk-v2"), marker = new File(sdk, ".complete");
+        deleteRecursively(new File(root, "sdk-v1"));
         if (!marker.isFile()) {
             progress.update("Preparing the compiler and reusable runtime SDK…", 2);
             deleteRecursively(sdk);
-            deleteRecursively(new File(root, "sdk-v1"));
             if (!sdk.mkdirs()) throw new IOException("Cannot create the private builder SDK directory");
             extractAsset(context, "compiler-sdk.zip", sdk);
             extractAsset(context, "runtime-sdk.zip", sdk);
