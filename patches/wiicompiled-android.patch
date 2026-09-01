@@ -1382,18 +1382,31 @@ index 0000000..e20523f
 +.size mkw_co_swap, .-mkw_co_swap
 +.section .note.GNU-stack,"",%progbits
 diff --git a/translator/src/Translator.Cli/Program.cs b/translator/src/Translator.Cli/Program.cs
-index c8f7fe4..9917884 100644
+index c8f7fe4..a47565c 100644
 --- a/translator/src/Translator.Cli/Program.cs
 +++ b/translator/src/Translator.Cli/Program.cs
-@@ -7,7 +7,6 @@ using System.IO;
+@@ -7,9 +7,9 @@ using System.IO;
  using System.Linq;
  using System.Numerics;
  using System.Reflection;
 -using System.Security.Cryptography;
  using System.Text;
  using System.Text.Json;
++using System.Text.Json.Serialization;
  using System.Text.RegularExpressions;
-@@ -1885,7 +1884,7 @@ int RunTranslateModCore(string[] argsTail, string? outputDirectoryOverride)
+ using System.Threading;
+ using System.Threading.Tasks;
+@@ -1697,7 +1697,8 @@ int RunTranslateModCore(string[] argsTail, string? outputDirectoryOverride)
+             $"[translator] Suppressed legacy Retro WFC payload bootstrap hook at 0x{legacyBootstrapHook:X8}; " +
+             "the shared payload is initialized statically.");
+     }
+-    var baseManifest = JsonSerializer.Deserialize<BaseManifest>(File.ReadAllText(baseManifestPath))
++    var baseManifest = JsonSerializer.Deserialize(
++        File.ReadAllText(baseManifestPath), TranslatorJsonContext.Default.BaseManifest)
+         ?? throw new InvalidDataException($"Failed to parse base manifest: {baseManifestPath}");
+     RetroWfcContractLoweringPlan? retroWfcLoweringPlan = null;
+     RetroWfcPayloadLoadResult? retroWfcPayload = null;
+@@ -1885,7 +1886,7 @@ int RunTranslateModCore(string[] argsTail, string? outputDirectoryOverride)
          baseManifest,
          dvdOverlayRoots,
          relocatedModuleImage,
@@ -1402,6 +1415,69 @@ index c8f7fe4..9917884 100644
          retroWfcLoweringPlan?.StaticPointers,
          selected.CodeSize,
          selected.BssSize,
+@@ -2159,13 +2160,11 @@ void WriteResolvedDispatchProfile(
+             group.OrderByDescending(entry => entry.Priority)
+                  .ThenByDescending(entry => KindRank(entry.Kind))
+                  .First().Kind == "native")
+-        .Select(group => new
+-        {
+-            Address = group.Key,
+-            Native = group.First(entry => entry.Kind == "native").Symbol,
+-            NativeSource = group.First(entry => entry.Kind == "native").SourceFile,
+-            Mod = group.First(entry => entry.Kind == "rr").Name
+-        })
++        .Select(group => new NativeOverriddenModPatch(
++            group.Key,
++            group.First(entry => entry.Kind == "native").Symbol,
++            group.First(entry => entry.Kind == "native").SourceFile,
++            group.First(entry => entry.Kind == "rr").Name))
+         .OrderBy(entry => entry.Address)
+         .ToArray();
+ 
+@@ -2185,14 +2184,12 @@ void WriteResolvedDispatchProfile(
+ 
+     JsonOutput.WriteIfChanged(
+         Path.Combine(outDir, "resolved_dispatch_profile.json"),
+-        new
+-        {
+-            Format = "mkwii-resolved-dispatch-profile",
+-            FormatVersion = 1,
+-            NativeOverriddenModPatches = nativeOverriddenModPatches,
+-            Entries = resolved
+-        },
+-        JsonOutput.Indented);
++        new ResolvedDispatchProfile(
++            "mkwii-resolved-dispatch-profile",
++            1,
++            nativeOverriddenModPatches,
++            resolved),
++        TranslatorCliJsonContext.Default.ResolvedDispatchProfile);
+ 
+     Console.WriteLine($"[translator] resolved dispatch profile: {resolved.Length:N0} winning address(es)");
+ }
+@@ -4061,4 +4058,22 @@ sealed record ResolvedDispatchEntry(
+     bool MustRemainDynamicallyDispatchable,
+     string SourceFile);
+ 
++sealed record NativeOverriddenModPatch(
++    uint Address,
++    string Native,
++    string NativeSource,
++    string Mod);
++
++sealed record ResolvedDispatchProfile(
++    string Format,
++    int FormatVersion,
++    IReadOnlyList<NativeOverriddenModPatch> NativeOverriddenModPatches,
++    IReadOnlyList<ResolvedDispatchEntry> Entries);
++
++[JsonSourceGenerationOptions(
++    GenerationMode = JsonSourceGenerationMode.Metadata,
++    WriteIndented = true)]
++[JsonSerializable(typeof(ResolvedDispatchProfile))]
++sealed partial class TranslatorCliJsonContext : JsonSerializerContext;
++
+ 
 diff --git a/translator/src/Translator.Cli/TranslationProjectConfig.cs b/translator/src/Translator.Cli/TranslationProjectConfig.cs
 index 2deb7df..f338d97 100644
 --- a/translator/src/Translator.Cli/TranslationProjectConfig.cs
@@ -1626,6 +1702,30 @@ index 3a295f0..920c0af 100644
      private static string SanitizeAssemblyPath(string path) => Path.GetFullPath(path).Replace('\\', '/');
  }
 +
+diff --git a/translator/src/Translator.Core/IO/JsonOutput.cs b/translator/src/Translator.Core/IO/JsonOutput.cs
+index ed7b128..957948e 100644
+--- a/translator/src/Translator.Core/IO/JsonOutput.cs
++++ b/translator/src/Translator.Core/IO/JsonOutput.cs
+@@ -1,6 +1,7 @@
+ using System;
+ using System.Text;
+ using System.Text.Json;
++using System.Text.Json.Serialization.Metadata;
+ 
+ namespace Translator.Core.IO;
+ 
+@@ -28,9 +29,9 @@ public static class JsonOutput
+ 
+     private static readonly byte[] TrailingNewLine = Encoding.UTF8.GetBytes(Environment.NewLine);
+ 
+-    public static bool WriteIfChanged<T>(string path, T value, JsonSerializerOptions options)
++    public static bool WriteIfChanged<T>(string path, T value, JsonTypeInfo<T> typeInfo)
+     {
+-        var json = JsonSerializer.SerializeToUtf8Bytes(value, options);
++        var json = JsonSerializer.SerializeToUtf8Bytes(value, typeInfo);
+         var content = new byte[json.Length + TrailingNewLine.Length];
+         json.CopyTo(content, 0);
+         TrailingNewLine.CopyTo(content, json.Length);
 diff --git a/translator/src/Translator.Core/Loading/ChecksumUtilities.cs b/translator/src/Translator.Core/Loading/ChecksumUtilities.cs
 index 5865714..4b2da11 100644
 --- a/translator/src/Translator.Core/Loading/ChecksumUtilities.cs
@@ -1753,6 +1853,120 @@ index 5865714..4b2da11 100644
 +        return result;
      }
  }
+diff --git a/translator/src/Translator.Core/Mods/BaseManifest.cs b/translator/src/Translator.Core/Mods/BaseManifest.cs
+index d0e69b4..b85d967 100644
+--- a/translator/src/Translator.Core/Mods/BaseManifest.cs
++++ b/translator/src/Translator.Core/Mods/BaseManifest.cs
+@@ -1,4 +1,5 @@
+ using System.Text.Json;
++using Translator.Core.IO;
+ 
+ namespace Translator.Core.Mods;
+ 
+@@ -44,7 +45,7 @@ public sealed class BaseFunctionIndex
+     public static BaseFunctionIndex Load(string path)
+     {
+         var json = File.ReadAllText(path);
+-        var manifest = JsonSerializer.Deserialize<BaseManifest>(json)
++        var manifest = JsonSerializer.Deserialize(json, TranslatorJsonContext.Default.BaseManifest)
+             ?? throw new InvalidDataException($"Failed to parse base manifest: {path}");
+         return new BaseFunctionIndex(manifest.Functions);
+     }
+diff --git a/translator/src/Translator.Core/Mods/BaseManifestBuilder.cs b/translator/src/Translator.Core/Mods/BaseManifestBuilder.cs
+index c543291..50c54cc 100644
+--- a/translator/src/Translator.Core/Mods/BaseManifestBuilder.cs
++++ b/translator/src/Translator.Core/Mods/BaseManifestBuilder.cs
+@@ -92,8 +92,9 @@ public static partial class BaseManifestBuilder
+         var manifestPath = Path.Combine(outputDir, $"{fileStem}_manifest.json");
+         var functionRangesPath = Path.Combine(outputDir, manifest.FunctionRangesFile);
+ 
+-        JsonWrite(manifestPath, manifest);
+-        JsonWrite(functionRangesPath, functions);
++        JsonOutput.WriteIfChanged(manifestPath, manifest, TranslatorJsonContext.Default.BaseManifest);
++        JsonOutput.WriteIfChanged(functionRangesPath, functions,
++            TranslatorJsonContext.Default.IReadOnlyListBaseFunctionRangeMetadata);
+ 
+         return new BaseManifestBuildResult
+         {
+@@ -249,9 +250,6 @@ public static partial class BaseManifestBuilder
+     // they are written compact. The shared writer also makes them gated and
+     // atomic; File.Create truncated the live file first, so an interrupted run
+     // could publish a half-written manifest that later commands would parse.
+-    private static void JsonWrite<T>(string path, T value) =>
+-        JsonOutput.WriteIfChanged(path, value, JsonOutput.Compact);
+-
+     [GeneratedRegex("([0-9A-Fa-f]{8})")]
+     private static partial Regex AddressRegex();
+ 
+diff --git a/translator/src/Translator.Core/Mods/BaseTranslationModAwareness.cs b/translator/src/Translator.Core/Mods/BaseTranslationModAwareness.cs
+index 3343f14..a03165b 100644
+--- a/translator/src/Translator.Core/Mods/BaseTranslationModAwareness.cs
++++ b/translator/src/Translator.Core/Mods/BaseTranslationModAwareness.cs
+@@ -1,4 +1,5 @@
+ using System.Text.Json;
++using System.Text.Json.Serialization.Metadata;
+ using Translator.Core.IO;
+ using Translator.Core.Parsing.Kamek;
+ 
+@@ -181,11 +182,12 @@ public sealed record BaseTranslationModAwarenessProfile(
+ 
+ public static class BaseTranslationModAwarenessFile
+ {
+-    private static readonly JsonSerializerOptions JsonOptions = JsonOutput.CompactCamelCase;
++    private static readonly JsonTypeInfo<BaseTranslationModAwareness> JsonTypeInfo =
++        CamelCaseTranslatorJsonContext.Default.BaseTranslationModAwareness;
+ 
+     public static BaseTranslationModAwareness Read(string path)
+     {
+-        var awareness = JsonSerializer.Deserialize<BaseTranslationModAwareness>(File.ReadAllText(path), JsonOptions)
++        var awareness = JsonSerializer.Deserialize(File.ReadAllText(path), JsonTypeInfo)
+             ?? throw new InvalidDataException($"Base translation mod-awareness record is empty: {path}");
+         Validate(awareness, path);
+         return awareness;
+@@ -201,7 +203,7 @@ public static class BaseTranslationModAwarenessFile
+     public static bool WriteIfChangedAtomic(string path, BaseTranslationModAwareness awareness)
+     {
+         Validate(awareness, path);
+-        return JsonOutput.WriteIfChanged(path, awareness, JsonOptions);
++        return JsonOutput.WriteIfChanged(path, awareness, JsonTypeInfo);
+     }
+ 
+     private static void Validate(BaseTranslationModAwareness awareness, string source)
+diff --git a/translator/src/Translator.Core/Mods/BaseTranslationOutputMetadata.cs b/translator/src/Translator.Core/Mods/BaseTranslationOutputMetadata.cs
+index 08ce2dc..e99d4c0 100644
+--- a/translator/src/Translator.Core/Mods/BaseTranslationOutputMetadata.cs
++++ b/translator/src/Translator.Core/Mods/BaseTranslationOutputMetadata.cs
+@@ -1,5 +1,6 @@
+ using System.Text;
+ using System.Text.Json;
++using System.Text.Json.Serialization.Metadata;
+ using Translator.Core.IO;
+ using Translator.Core.Translation;
+ using Translator.Core.Loading;
+@@ -173,11 +174,12 @@ public static class BaseTranslationOutputMetadataFile
+ {
+     // Machine-read only: indentation tripled the payload of a file that already
+     // measures tens of megabytes and is never opened by a human.
+-    private static readonly JsonSerializerOptions JsonOptions = JsonOutput.CompactCamelCase;
++    private static readonly JsonTypeInfo<BaseTranslationOutputMetadata> JsonTypeInfo =
++        CamelCaseTranslatorJsonContext.Default.BaseTranslationOutputMetadata;
+ 
+     public static BaseTranslationOutputMetadata Read(string path)
+     {
+-        var metadata = JsonSerializer.Deserialize<BaseTranslationOutputMetadata>(File.ReadAllText(path), JsonOptions)
++        var metadata = JsonSerializer.Deserialize(File.ReadAllText(path), JsonTypeInfo)
+             ?? throw new InvalidDataException($"Base translation output metadata is empty: {path}");
+         Validate(metadata, path);
+         return metadata;
+@@ -189,7 +191,7 @@ public static class BaseTranslationOutputMetadataFile
+         // Serialise straight into a byte buffer. The previous shape built a
+         // multi-megabyte UTF-16 string and then read the whole live file back as a
+         // second one purely to answer "did anything change?".
+-        return JsonOutput.WriteIfChanged(path, metadata, JsonOptions);
++        return JsonOutput.WriteIfChanged(path, metadata, JsonTypeInfo);
+     }
+ 
+     private static void Validate(BaseTranslationOutputMetadata metadata, string source)
 diff --git a/translator/src/Translator.Core/Mods/OverlayFunctionBuilder.cs b/translator/src/Translator.Core/Mods/OverlayFunctionBuilder.cs
 index 26a7758..399e348 100644
 --- a/translator/src/Translator.Core/Mods/OverlayFunctionBuilder.cs
