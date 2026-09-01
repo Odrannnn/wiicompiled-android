@@ -115,12 +115,14 @@ public final class MainActivity extends Activity {
         if (BuildConfig.WITH_GAME) button(overview, "Launch Mario Kart Wii", v -> launchGame());
         addCard(page, overview);
         LinearLayout disc = card("PAL disc reference",
-            "The picker grants access only to your document. Inspection reads the header and does not copy the image.");
-        discStatus = label(disc, getPreferences(MODE_PRIVATE).getString("discStatus", "No disc selected."),
+            "Extract your own clean PAL RMCP01 image directly into app-private storage. Supports ISO, RVZ, WBFS, WIA, CISO, and GCZ.");
+        discStatus = label(disc, getPreferences(MODE_PRIVATE).getString("discStatus", DiscExtractor.installedStatus(this)),
             15, Color.rgb(209, 250, 229));
-        button(disc, "Select disc image", v -> {
+        button(disc, "Select and extract disc image", v -> {
             Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
             intent.addCategory(Intent.CATEGORY_OPENABLE); intent.setType("*/*");
+            intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
+                "application/octet-stream", "application/x-iso9660-image", "application/x-wbfs"});
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
             startActivityForResult(intent, PICK_DISC);
         });
@@ -287,8 +289,8 @@ public final class MainActivity extends Activity {
                 }
             });
         } else if (request == PICK_DISC) {
-            discStatus.setText("Inspecting selected document…");
-            worker.execute(() -> inspectDisc(uri, data.getFlags()));
+            discStatus.setText("Opening selected disc image…");
+            worker.execute(() -> extractDisc(uri, data.getFlags()));
         } else if (request == PICK_GPU_DRIVER) {
             gpuDriverStatus.setText("Importing and validating driver…");
             worker.execute(() -> {
@@ -594,32 +596,48 @@ public final class MainActivity extends Activity {
         });
     }
 
-    private void inspectDisc(Uri uri, int grantedFlags) {
+    private void extractDisc(Uri uri, int grantedFlags) {
         String name = "Selected document";
-        String text;
         try {
             try (Cursor cursor = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
                 if (cursor != null && cursor.moveToFirst()) name = cursor.getString(0);
             }
-            try (InputStream stream = getContentResolver().openInputStream(uri)) {
-                if (stream == null) throw new java.io.IOException("Document provider did not open the image");
-                text = name + "\n" + DiscHeader.inspect(stream);
-            }
+            boolean persistent = false;
             try {
                 getContentResolver().takePersistableUriPermission(uri, grantedFlags & Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                SharedPreferences preferences = getPreferences(MODE_PRIVATE);
-                String old = preferences.getString("discUri", null);
-                preferences.edit().putString("discUri", uri.toString()).apply();
-                if (old != null && !old.equals(uri.toString())) {
-                    try { getContentResolver().releasePersistableUriPermission(Uri.parse(old), Intent.FLAG_GRANT_READ_URI_PERMISSION); }
-                    catch (SecurityException ignored) { /* Provider may already have revoked the old grant. */ }
-                }
+                persistent = true;
             } catch (SecurityException e) {
-                text += "\nProvider did not grant persistent access. Select again after restarting.";
-                getPreferences(MODE_PRIVATE).edit().remove("discUri").apply();
+                // The activity's temporary grant remains valid for this extraction.
             }
-        } catch (Exception e) { text = "Cannot read selection: " + e.getMessage(); }
-        final String finished = text;
+            final String selectedName = name;
+            String summary = DiscExtractor.extract(this, uri, (stage, done, total) -> {
+                String progress = stage;
+                if (total > 0) progress += ": " + Math.min(done * 100 / total, 100) + "% · "
+                    + (done / 1048576) + " / " + (total / 1048576) + " MiB";
+                final String update = selectedName + "\n" + progress;
+                runOnUiThread(() -> { if (!stopped) discStatus.setText(update); });
+                return true;
+            });
+            SharedPreferences preferences = getPreferences(MODE_PRIVATE);
+            String old = preferences.getString("discUri", null);
+            SharedPreferences.Editor editor = preferences.edit();
+            if (persistent) editor.putString("discUri", uri.toString()); else editor.remove("discUri");
+            editor.apply();
+            if (old != null && !old.equals(uri.toString())) {
+                try { getContentResolver().releasePersistableUriPermission(Uri.parse(old), Intent.FLAG_GRANT_READ_URI_PERMISSION); }
+                catch (SecurityException ignored) { /* Provider may already have revoked the old grant. */ }
+            }
+            String text = selectedName + "\n" + summary;
+            if (!persistent) text += "\nThe provider did not grant persistent source access; the extracted files are unaffected.";
+            saveDiscStatus(text);
+            return;
+        } catch (Exception e) {
+            saveDiscStatus("Disc extraction failed: " + e.getMessage() + "\nThe previous installed extraction was left unchanged.");
+            return;
+        }
+    }
+
+    private void saveDiscStatus(String finished) {
         getPreferences(MODE_PRIVATE).edit().putString("discStatus", finished).apply();
         runOnUiThread(() -> { if (!stopped) discStatus.setText(finished); });
     }
