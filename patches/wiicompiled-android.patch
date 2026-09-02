@@ -1974,11 +1974,104 @@ index dacbbe3..be47d88 100644
          kind = DeviceKind::NcdManage;
      } else if (std::strcmp(path, "/dev/net/ip/top") == 0) {
          kind = DeviceKind::IpTop;
+diff --git a/runtime/src/hle/net/network_deferred.cpp b/runtime/src/hle/net/network_deferred.cpp
+index 8ed5e0e..f7d18f0 100644
+--- a/runtime/src/hle/net/network_deferred.cpp
++++ b/runtime/src/hle/net/network_deferred.cpp
+@@ -204,6 +204,21 @@ static DeferredDnsCompletion ResolveDeferredDns(DeferredDnsWork work) {
+     DeferredDnsCompletion completion{};
+     completion.work = std::move(work);
+ 
++    // Retro Rewind's signed payload still names the retired NAS origin. The
++    // public frontend now serves the same /ac route, so resolve that one exact
++    // legacy name through the live frontend while preserving the guest-facing
++    // canonical name in the result structure.
++    const std::string loweredNode = Lower(completion.work.node);
++    const bool rerouteRetroNas = RetroRewindProfileActive() &&
++        loweredNode == "nas.play.rwfc.net";
++    const std::string resolverNode = rerouteRetroNas
++        ? "play.rwfc.net"
++        : completion.work.node;
++    if (rerouteRetroNas) {
++        RT_LOGF(RT_TAG_NET, "Retro WFC NAS route: %s -> %s\n",
++                completion.work.node.c_str(), resolverNode.c_str());
++    }
++
+     addrinfo hints{};
+     addrinfo* hintPtr = nullptr;
+     if (completion.work.kind != DeferredDnsKind::GetAddrInfo) {
+@@ -233,7 +248,7 @@ static DeferredDnsCompletion ResolveDeferredDns(DeferredDnsWork work) {
+     }
+ 
+     addrinfo* nativeResults = nullptr;
+-    const char* node = completion.work.node.empty() ? nullptr : completion.work.node.c_str();
++    const char* node = resolverNode.empty() ? nullptr : resolverNode.c_str();
+     const char* service = completion.work.service.empty() ? nullptr : completion.work.service.c_str();
+     const int gai = getaddrinfo(node, service, hintPtr, &nativeResults);
+     if (gai != 0 || !nativeResults) {
 diff --git a/runtime/src/hle/net/network_ssl.cpp b/runtime/src/hle/net/network_ssl.cpp
-index d0bb9ac..c22eec9 100644
+index d0bb9ac..a0d4b69 100644
 --- a/runtime/src/hle/net/network_ssl.cpp
 +++ b/runtime/src/hle/net/network_ssl.cpp
-@@ -530,16 +530,64 @@ static void ClearSslSession(SslSession& ssl) {
+@@ -169,6 +169,31 @@ static bool StartsNasAuthRequest(const uint8_t* data, uint32_t size) {
+     return size >= 9 && std::memcmp(data, "POST /ac ", 9) == 0;
+ }
+ 
++static void RewriteRetiredRetroNasHost(std::vector<uint8_t>& request) {
++    if (!RetroRewindProfileActive() || request.empty()) {
++        return;
++    }
++
++    constexpr std::string_view oldHeader = "\r\nhost: nas.play.rwfc.net";
++    const std::string text(reinterpret_cast<const char*>(request.data()), request.size());
++    const size_t headerEnd = text.find("\r\n\r\n");
++    if (headerEnd == std::string::npos) {
++        return;
++    }
++
++    const std::string loweredHeaders = Lower(std::string_view(text).substr(0, headerEnd));
++    const size_t match = loweredHeaders.find(oldHeader);
++    if (match == std::string::npos) {
++        return;
++    }
++
++    const size_t hostnameOffset = match + std::string_view("\r\nhost: ").size();
++    constexpr std::string_view replacement = "play.rwfc.net";
++    request.erase(request.begin() + hostnameOffset,
++                  request.begin() + hostnameOffset + std::string_view("nas.play.rwfc.net").size());
++    request.insert(request.begin() + hostnameOffset, replacement.begin(), replacement.end());
++}
++
+ // SSL route: the session carries the hostname the guest asked for, so the NAS
+ // host is identified by name. Deliberately not IsRetroNasSslHost - the SSL write
+ // path re-assembles NAS auth regardless of which profile is active.
+@@ -182,7 +207,11 @@ static NasSslWriteAction PrepareNasSslWrite(SslSession& ssl, const uint8_t* data
+     if (!isNasHost || (!StartsNasAuthRequest(data, size) && ssl.nasWriteBuffer.empty())) {
+         return NasSslWriteAction::PassThrough;
+     }
+-    return AccumulateNasRequest(ssl.nasWriteBuffer, data, size, patched);
++    const NasSslWriteAction action = AccumulateNasRequest(ssl.nasWriteBuffer, data, size, patched);
++    if (action == NasSslWriteAction::Ready) {
++        RewriteRetiredRetroNasHost(patched);
++    }
++    return action;
+ }
+ 
+ // Plain-TCP route: a rerouted 443->80 NAS connection has no hostname on the
+@@ -195,7 +224,11 @@ NasSslWriteAction PreparePlainNasTcpWrite(WiiSocket& socket, const uint8_t* data
+     if (!StartsNasAuthRequest(data, size) && socket.nasWriteBuffer.empty()) {
+         return NasSslWriteAction::PassThrough;
+     }
+-    return AccumulateNasRequest(socket.nasWriteBuffer, data, size, patched);
++    const NasSslWriteAction action = AccumulateNasRequest(socket.nasWriteBuffer, data, size, patched);
++    if (action == NasSslWriteAction::Ready) {
++        RewriteRetiredRetroNasHost(patched);
++    }
++    return action;
+ }
+ 
+ static bool WriteSslReturn(const std::vector<IoVector>& in, int32_t value) {
+@@ -530,16 +563,64 @@ static void ClearSslSession(SslSession& ssl) {
      ssl = {};
  }
  
@@ -2049,7 +2142,7 @@ index d0bb9ac..c22eec9 100644
  }
  #endif
  
-@@ -628,6 +676,10 @@ int32_t HandleSslIoctlv(uint32_t cmd, const std::vector<IoVector>& in, const std
+@@ -628,6 +709,10 @@ int32_t HandleSslIoctlv(uint32_t cmd, const std::vector<IoVector>& in, const std
          const int timeoutMs = 15000;
          setsockopt(socket->native, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
          setsockopt(socket->native, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
