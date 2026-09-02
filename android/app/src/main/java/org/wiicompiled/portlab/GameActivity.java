@@ -41,6 +41,7 @@ public final class GameActivity extends SDLActivity {
     private InputManager inputManager;
     private boolean touchStickActive;
     private boolean virtualPadInstalled;
+    private volatile boolean nativeInputActive;
     private String runtimeLibrary = CodePatchRegistry.BASE_LIBRARY;
     private RuntimePackManager.Pack runtimePack;
     private File runtimeFile;
@@ -182,8 +183,9 @@ public final class GameActivity extends SDLActivity {
     }
 
     private void installTouchControls() {
-        resetVirtualPad();
         virtualPadInstalled = true;
+        nativeInputActive = true;
+        resetVirtualPad();
         inputManager = getSystemService(InputManager.class);
         if (inputManager != null) inputManager.registerInputDeviceListener(inputDeviceListener, null);
         for (int deviceId : InputDevice.getDeviceIds()) {
@@ -255,6 +257,7 @@ public final class GameActivity extends SDLActivity {
         background.setCornerRadius(dp(14));
         button.setBackground(background);
         button.setOnClickListener(view -> {
+            if (!nativeInputActive || isFinishing() || isDestroyed()) return;
             // The runtime already exposes its settings bar through F10. Inject the same SDL
             // key pair so this remains an APK-only change and existing private runtimes work.
             SDLActivity.onNativeKeyDown(KeyEvent.KEYCODE_F10);
@@ -298,7 +301,9 @@ public final class GameActivity extends SDLActivity {
     }
 
     private void publishVirtualPad() {
-        nativeSetVirtualPadState(virtualButtons, virtualStickX, virtualStickY);
+        if (nativeInputActive) {
+            nativeSetVirtualPadState(virtualButtons, virtualStickX, virtualStickY);
+        }
     }
 
     private void resetVirtualPad() {
@@ -437,8 +442,14 @@ public final class GameActivity extends SDLActivity {
 
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
 
+    @Override protected void onResume() {
+        super.onResume();
+        if (virtualPadInstalled && preparationError == null) nativeInputActive = true;
+    }
+
     @Override protected void onPause() {
         if (virtualPadInstalled) resetVirtualPad();
+        nativeInputActive = false;
         super.onPause();
     }
 
@@ -452,6 +463,7 @@ public final class GameActivity extends SDLActivity {
         catch (java.io.IOException error) { throw new IllegalStateException(error); }
     }
     @Override protected void onDestroy() {
+        nativeInputActive = false;
         if (inputManager != null) inputManager.unregisterInputDeviceListener(inputDeviceListener);
         super.onDestroy();
         // This activity lives in :game; don't leave non-resettable guest globals for another run.
