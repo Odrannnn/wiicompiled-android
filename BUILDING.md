@@ -149,6 +149,12 @@ Keep enough free tablet storage for the extracted data in addition to the source
 
 On-device extraction supplies the private inputs. In the Builder edition, choose **Build private runtime** after extraction. Keep the tablet connected to power and leave at least 4 GiB of free internal storage. A foreground data-sync service keeps the work alive while the activity is backgrounded and exposes progress plus cancellation. If the pinned Retro Rewind profile is enabled, the builder automatically includes it. Enabling Retro Rewind after a base-only build requires one full mod-aware regeneration; once the combined pack is active, no rebuild is needed until the pinned code profile changes.
 
+Changes inside `patches/wiicompiled-android.patch` that affect Aurora input or the runtime SDK, including controller hotplug synchronization and gyro gestures, require **Build private runtime** once after installing the updated Builder APK. The existing extracted disc, installed mods, NAND, saves, and cached compiler SDK remain in place. A rebuilt combined base/Retro Rewind pack contains the same controller runtime changes in both libraries. APK-only activity changes, such as touch layout or Android event routing, do not by themselves require regenerating the private runtime.
+
+For local split-screen, connect the gamepads and open **Settings > Controller settings**. Select Port 1 through Port 4 and assign one connected controller to each port. Assignments persist by controller identity. Motion controls are available in the same menu when SDL exposes a gyro; **Shake controller for wheelies / tricks** produces a short D-pad Up input and the threshold is adjustable in radians per second. Generic Bluetooth controllers without an exposed sensor continue to work with buttons and sticks but cannot provide this gesture.
+
+Retro Rewind WFC is outside the current Android build. `translate-mod` is invoked with `--skip-retro-wfc`, and Android creates the runtime configuration with networking disabled. Do not describe WFC or online matchmaking as supported until the omitted payload, network HLE, authentication behavior, and reconnect/error paths have been implemented and validated together.
+
 The device performs these steps in app-private storage:
 
 1. verifies that the extracted `main.dol` and `StaticR.rel` are present;
