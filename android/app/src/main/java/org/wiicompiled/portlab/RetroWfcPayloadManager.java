@@ -19,7 +19,7 @@ import java.security.spec.RSAPublicKeySpec;
 
 /** Downloads and authenticates the production Retro-WFC payload used during translation. */
 final class RetroWfcPayloadManager {
-    private static final String ENDPOINT = "http://nas.play.rwfc.net/payload?g=RMCPD00";
+    private static final String ENDPOINT = "http://play.rwfc.net/payload?g=RMCPD00";
     private static final int MAX_BYTES = 16 * 1024 * 1024;
     private static final int SIGNED_OFFSET = 0x110;
     private static final int SIGNATURE_OFFSET = 0x10;
@@ -39,7 +39,7 @@ final class RetroWfcPayloadManager {
         if (!directory.mkdirs() && !directory.isDirectory())
             throw new IOException("Cannot create the private Retro-WFC payload directory");
         File destination = new File(directory, "payload.RMCPD00.bin");
-        IOException first = null;
+        IOException failure = null;
         for (int attempt = 0; attempt < 2; attempt++) {
             try {
                 byte[] payload = downloadAttempt();
@@ -59,23 +59,31 @@ final class RetroWfcPayloadManager {
             } catch (SecurityException error) {
                 throw new IOException(error.getMessage(), error);
             } catch (IOException error) {
-                if (attempt != 0) throw new IOException(
-                    "Could not download the signed Retro-WFC payload after two attempts", error);
-                first = error;
+                failure = error;
+                android.util.Log.w("WiiCompiled", "Retro-WFC payload download attempt " + (attempt + 1) + " failed", error);
+                if (attempt == 0) {
+                    try {
+                        Thread.sleep(1_000);
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        throw new IOException("Retro-WFC payload download was interrupted", interrupted);
+                    }
+                }
             }
         }
         if (destination.isFile()) {
             try {
                 byte[] cached = Files.readAllBytes(destination.toPath());
                 validate(cached);
-                android.util.Log.w("WiiCompiled", "Retro-WFC endpoint unavailable; using the last signed payload", first);
+                android.util.Log.w("WiiCompiled", "Retro-WFC endpoint unavailable; using the last signed payload", failure);
                 return destination;
             } catch (SecurityException | IOException cachedError) {
-                if (first != null) cachedError.addSuppressed(first);
+                if (failure != null) cachedError.addSuppressed(failure);
                 throw new IOException("The Retro-WFC endpoint is unavailable and its cached payload is invalid", cachedError);
             }
         }
-        throw first == null ? new IOException("Retro-WFC payload download failed") : first;
+        throw new IOException("Could not download the signed Retro-WFC payload after two attempts",
+            failure == null ? new IOException("Unknown download failure") : failure);
     }
 
     private static byte[] downloadAttempt() throws IOException {
@@ -84,6 +92,7 @@ final class RetroWfcPayloadManager {
         connection.setConnectTimeout(30_000);
         connection.setReadTimeout(30_000);
         connection.setRequestProperty("Accept", "application/octet-stream");
+        connection.setRequestProperty("User-Agent", "WiiCompiled-Android/0.3");
         try {
             int status = connection.getResponseCode();
             if (status >= 300 && status < 400)
