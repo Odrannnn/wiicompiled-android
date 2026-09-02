@@ -3472,7 +3472,7 @@ index 08ce2dc..e99d4c0 100644
  
      private static void Validate(BaseTranslationOutputMetadata metadata, string source)
 diff --git a/translator/src/Translator.Core/Mods/Mkwii/RetroWfcPayload.cs b/translator/src/Translator.Core/Mods/Mkwii/RetroWfcPayload.cs
-index ddefe71..011c2e6 100644
+index ddefe71..fa03a07 100644
 --- a/translator/src/Translator.Core/Mods/Mkwii/RetroWfcPayload.cs
 +++ b/translator/src/Translator.Core/Mods/Mkwii/RetroWfcPayload.cs
 @@ -1,6 +1,6 @@
@@ -3500,7 +3500,7 @@ index ddefe71..011c2e6 100644
 +        var patchRecords = new JsonArray();
 +        foreach (var record in contractRecords)
 +        {
-+            patchRecords.Add(record);
++            patchRecords.Add((JsonNode)record);
 +        }
 +        var contractJson = new JsonObject { ["patchRecords"] = patchRecords }.ToJsonString();
          var loweringPlan = RetroWfcContractLoweringPlanner.Build(
@@ -3568,7 +3568,7 @@ index ddefe71..011c2e6 100644
              ["address"] = $"0x{address:X8}",
              ["instructionCount"] = instructionCount,
 -            ["semanticActionIds"] = new[] { actionId },
-+            ["semanticActionIds"] = new JsonArray { actionId },
++            ["semanticActionIds"] = new JsonArray(JsonValue.Create(actionId)),
          });
      }
  
@@ -3593,7 +3593,7 @@ index ddefe71..011c2e6 100644
              ["typeName"] = "writePointer",
              ["address"] = $"0x{address:X8}",
 -            ["semanticActionIds"] = new[] { actionId },
-+            ["semanticActionIds"] = new JsonArray { actionId },
++            ["semanticActionIds"] = new JsonArray(JsonValue.Create(actionId)),
          });
      }
  
