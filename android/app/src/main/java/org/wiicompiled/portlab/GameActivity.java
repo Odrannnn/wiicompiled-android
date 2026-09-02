@@ -10,6 +10,7 @@ import android.graphics.Paint;
 import android.graphics.drawable.GradientDrawable;
 import android.view.Gravity;
 import android.view.InputDevice;
+import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowInsets;
@@ -123,6 +124,8 @@ public final class GameActivity extends SDLActivity {
         controls.requestApplyInsets();
         int edge = dp(24), stickSize = dp(150), dpadSize = dp(42), dpadGap = dp(4);
 
+        addSettingsButton(controls, edge);
+
         AnalogStickView stick = new AnalogStickView(this);
         FrameLayout.LayoutParams stickParams = new FrameLayout.LayoutParams(
             stickSize, stickSize, Gravity.BOTTOM | Gravity.LEFT);
@@ -157,6 +160,33 @@ public final class GameActivity extends SDLActivity {
             edge + dp(104), edge + dp(224), dp(68), dp(44));
         addPadButton(controls, "+", PAD_START, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL,
             0, edge, dp(62), dp(50));
+    }
+
+    private void addSettingsButton(FrameLayout parent, int edge) {
+        TextView button = new TextView(this);
+        button.setText("SETTINGS");
+        button.setTextColor(Color.WHITE);
+        button.setTextSize(13);
+        button.setGravity(Gravity.CENTER);
+        button.setAlpha(0.78f);
+        button.setContentDescription("Show or hide port settings");
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(Color.argb(190, 15, 23, 42));
+        background.setStroke(dp(2), Color.argb(220, 94, 234, 212));
+        background.setCornerRadius(dp(14));
+        button.setBackground(background);
+        button.setOnClickListener(view -> {
+            // The runtime already exposes its settings bar through F10. Inject the same SDL
+            // key pair so this remains an APK-only change and existing private runtimes work.
+            SDLActivity.onNativeKeyDown(KeyEvent.KEYCODE_F10);
+            SDLActivity.onNativeKeyUp(KeyEvent.KEYCODE_F10);
+            view.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP);
+        });
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+            dp(96), dp(46), Gravity.TOP | Gravity.RIGHT);
+        params.topMargin = edge;
+        params.rightMargin = edge;
+        parent.addView(button, params);
     }
 
     private void addPadButton(FrameLayout parent, String label, int mask, int gravity,
