@@ -33,8 +33,20 @@ index 002344b..7a4faef 100644
  endif ()
 +
 +
+diff --git a/aurora-main/cmake/aurora_gx.cmake b/aurora-main/cmake/aurora_gx.cmake
+index ff740a7..5b3e29b 100644
+--- a/aurora-main/cmake/aurora_gx.cmake
++++ b/aurora-main/cmake/aurora_gx.cmake
+@@ -44,4 +44,7 @@ set_target_properties(aurora_gx PROPERTIES FOLDER "aurora")
+ 
+ target_link_libraries(aurora_gx PUBLIC aurora::core xxhash)
+ target_link_libraries(aurora_gx PRIVATE absl::btree absl::flat_hash_map dawn::webgpu_dawn sqlite3 TracyClient PNG::PNG)
++if(ANDROID)
++  target_link_libraries(aurora_gx PRIVATE android)
++endif()
+ target_compile_definitions(aurora_gx PRIVATE WEBGPU_DAWN)
 diff --git a/aurora-main/include/aurora/gfx.h b/aurora-main/include/aurora/gfx.h
-index f58252f..8b7c2f8 100644
+index f58252f..7f3a0b6 100644
 --- a/aurora-main/include/aurora/gfx.h
 +++ b/aurora-main/include/aurora/gfx.h
 @@ -42,6 +42,18 @@ typedef struct {
@@ -56,6 +68,28 @@ index f58252f..8b7c2f8 100644
  } AuroraPresentTiming;
  
  const AuroraStats* aurora_get_stats();
+@@ -78,6 +90,21 @@ void aurora_set_skip_unready_pipelines(bool enabled);
+ bool aurora_get_skip_unready_pipelines();
+ uint32_t aurora_get_queued_pipeline_count();
+ 
++typedef struct {
++  uint32_t priorityQueued;
++  uint32_t backgroundQueued;
++  uint32_t activeBackgroundWorkers;
++  uint32_t backgroundWorkerLimit;
++  double lastFrameTimeMs;
++  double averageFrameTimeMs;
++  // Android thermal status (0 none through 6 shutdown), or -1 when unavailable.
++  int32_t thermalStatus;
++  uint32_t prewarmActive;
++  uint32_t performanceHintsActive;
++} AuroraPipelineDiagnostics;
++
++void aurora_get_pipeline_diagnostics(AuroraPipelineDiagnostics* diagnostics);
++
+ // Controls whether display copies bypass the Wii's vertical copy filter.
+ void aurora_set_disable_copy_filter(bool disabled);
+ bool aurora_get_disable_copy_filter();
 diff --git a/aurora-main/include/dolphin/pad.h b/aurora-main/include/dolphin/pad.h
 index 6f821c3..d415f43 100644
 --- a/aurora-main/include/dolphin/pad.h
@@ -415,10 +449,38 @@ index ff8d4c6..b1a39c9 100644
    auto* ctrl = aurora::input::get_controller_for_player(port);
    if (ctrl == nullptr || ctrl->m_isGameCube || !ctrl->m_hasRumble) {
 diff --git a/aurora-main/lib/gfx/pipeline_cache.cpp b/aurora-main/lib/gfx/pipeline_cache.cpp
-index b0c94d4..82f660c 100644
+index b0c94d4..8a33b93 100644
 --- a/aurora-main/lib/gfx/pipeline_cache.cpp
 +++ b/aurora-main/lib/gfx/pipeline_cache.cpp
-@@ -66,8 +66,19 @@ constexpr size_t MaxQueuedPipelineBuilds = 256;
+@@ -17,6 +17,14 @@
+ #include <thread>
+ #include <vector>
+ 
++#if defined(__ANDROID__)
++#include <android/performance_hint.h>
++#include <android/thermal.h>
++#include <dlfcn.h>
++#include <sys/resource.h>
++#include <unistd.h>
++#endif
++
+ #include <SDL3/SDL_iostream.h>
+ #include <absl/container/flat_hash_map.h>
+ #include <absl/container/flat_hash_set.h>
+@@ -59,6 +67,12 @@ static bool g_hasPipelineThread = false;
+ static bool g_pipelineFrameActive = false;
+ static std::atomic_bool g_skipUnreadyGxPipelines = false;
+ static size_t g_pipelinesPerFrame = 0;
++static std::chrono::steady_clock::time_point g_pipelineFrameStarted{};
++static double g_lastPipelineFrameTimeMs = 0.0;
++static double g_averagePipelineFrameTimeMs = 0.0;
++static uint32_t g_fastPipelineFrames = 0;
++static uint32_t g_backgroundCooldownFrames = 0;
++static std::atomic_bool g_performanceHintsActive{false};
+ // Keep first-use compilation bounded. The render command stream remains ordered;
+ // it waits for a queued pipeline only when the corresponding draw is consumed.
+ constexpr size_t MaxQueuedPipelineBuilds = 256;
+@@ -66,8 +80,19 @@ constexpr size_t MaxQueuedPipelineBuilds = 256;
  // render and game threads, and cap large hosts to limit driver submissions and memory use.
  constexpr size_t ReservedLogicalProcessors = 2;
  constexpr size_t MaxPipelineWorkers = 22;
@@ -439,6 +501,368 @@ index b0c94d4..82f660c 100644
  // For synchronous pipeline fallback (OpenGL)
  #ifdef NDEBUG
  constexpr size_t BuildPipelinesPerFrame = 5;
+@@ -77,6 +102,7 @@ constexpr size_t BuildPipelinesPerFrame = 1;
+ static std::vector<std::thread> g_pipelineThreads;
+ static bool g_pipelineThreadEnd = false;
+ static size_t g_activeBackgroundPipelineWorkers = 0;
++static size_t g_backgroundPipelineWorkerLimit = MaxBackgroundPipelineWorkers;
+ static std::condition_variable g_pipelineCv;
+ static absl::flat_hash_map<PipelineRef, CachedPipeline> g_pipelines;
+ static std::deque<PendingPipeline> g_priorityPipelines;
+@@ -95,6 +121,192 @@ static absl::flat_hash_set<PipelineRef> g_pipelineCachePendingWrites;
+ static bool g_pipelineCacheWriterStop = false;
+ static int g_sdlVfsRegisterResult = SQLITE_ERROR;
+ 
++#if defined(__ANDROID__)
++static AThermalManager* g_thermalManager = nullptr;
++static int32_t g_thermalStatus = ATHERMAL_STATUS_ERROR;
++using GetPerformanceHintManager = APerformanceHintManager* (*)();
++using CreatePerformanceHintSession = APerformanceHintSession* (*)(APerformanceHintManager*, const int32_t*, size_t,
++                                                                  int64_t);
++using ReportPerformanceHintDuration = int (*)(APerformanceHintSession*, int64_t);
++using ClosePerformanceHintSession = void (*)(APerformanceHintSession*);
++static void* g_performanceHintLibrary = nullptr;
++static APerformanceHintManager* g_performanceHintManager = nullptr;
++static APerformanceHintSession* g_performanceHintSession = nullptr;
++static CreatePerformanceHintSession g_createPerformanceHintSession = nullptr;
++static ReportPerformanceHintDuration g_reportPerformanceHintDuration = nullptr;
++static ClosePerformanceHintSession g_closePerformanceHintSession = nullptr;
++static int32_t g_performanceHintThread = -1;
++#else
++static int32_t g_thermalStatus = -1;
++#endif
++
++static size_t thermal_background_worker_cap() noexcept {
++#if defined(__ANDROID__)
++  if (g_thermalStatus >= ATHERMAL_STATUS_MODERATE) {
++    return 0;
++  }
++  if (g_thermalStatus == ATHERMAL_STATUS_LIGHT) {
++    return (std::min)(size_t{1}, MaxBackgroundPipelineWorkers);
++  }
++#endif
++  return MaxBackgroundPipelineWorkers;
++}
++
++// Called with g_pipelineMutex held. A single slow 60 Hz frame pauses prewarming for roughly
++// three quarters of a second; sustained headroom restores one worker, then a second only after
++// two seconds of consistently fast frames. First-use work remains on the priority queue.
++static void update_background_worker_limit(double frameTimeMs) noexcept {
++  g_lastPipelineFrameTimeMs = frameTimeMs;
++  g_averagePipelineFrameTimeMs = g_averagePipelineFrameTimeMs == 0.0
++                                      ? frameTimeMs
++                                      : g_averagePipelineFrameTimeMs * 0.9 + frameTimeMs * 0.1;
++
++#if !defined(__ANDROID__)
++  g_backgroundPipelineWorkerLimit = MaxBackgroundPipelineWorkers;
++  return;
++#else
++  constexpr double SlowFrameMs = 18.0;
++  constexpr double SlowAverageMs = 17.25;
++  constexpr double FastFrameMs = 14.5;
++  constexpr uint32_t PauseFrames = 45;
++  constexpr uint32_t FastFramesForSecondWorker = 120;
++
++  size_t desired = 1;
++  if (frameTimeMs >= SlowFrameMs || g_averagePipelineFrameTimeMs >= SlowAverageMs) {
++    g_backgroundCooldownFrames = PauseFrames;
++    g_fastPipelineFrames = 0;
++    desired = 0;
++  } else if (g_backgroundCooldownFrames != 0) {
++    --g_backgroundCooldownFrames;
++    desired = 0;
++  } else {
++    if (frameTimeMs <= FastFrameMs && g_averagePipelineFrameTimeMs <= FastFrameMs) {
++      ++g_fastPipelineFrames;
++    } else {
++      g_fastPipelineFrames = 0;
++    }
++    desired = g_fastPipelineFrames >= FastFramesForSecondWorker ? 2 : 1;
++  }
++  g_backgroundPipelineWorkerLimit = (std::min)(desired, thermal_background_worker_cap());
++#endif
++}
++
++#if defined(__ANDROID__)
++static void set_android_background_priority(const char* role) noexcept {
++  constexpr int BackgroundNiceValue = 10;
++  if (setpriority(PRIO_PROCESS, 0, BackgroundNiceValue) != 0) {
++    Log.warn("Could not lower {} thread priority", role);
++  }
++}
++
++static void thermal_status_changed(void*, AThermalStatus status) {
++  {
++    std::lock_guard lock{g_pipelineMutex};
++    g_thermalStatus = static_cast<int32_t>(status);
++    g_backgroundPipelineWorkerLimit =
++        (std::min)(g_backgroundPipelineWorkerLimit, thermal_background_worker_cap());
++  }
++  g_pipelineCv.notify_all();
++}
++
++static void initialize_thermal_monitor() {
++  g_thermalManager = AThermal_acquireManager();
++  if (g_thermalManager == nullptr) {
++    return;
++  }
++  g_thermalStatus = static_cast<int32_t>(AThermal_getCurrentThermalStatus(g_thermalManager));
++  if (AThermal_registerThermalStatusListener(g_thermalManager, thermal_status_changed, nullptr) != 0) {
++    Log.warn("Android thermal status listener is unavailable");
++  }
++  g_backgroundPipelineWorkerLimit =
++      (std::min)(g_backgroundPipelineWorkerLimit, thermal_background_worker_cap());
++}
++
++static void shutdown_thermal_monitor() {
++  if (g_thermalManager == nullptr) {
++    return;
++  }
++  AThermal_unregisterThermalStatusListener(g_thermalManager, thermal_status_changed, nullptr);
++  AThermal_releaseManager(g_thermalManager);
++  g_thermalManager = nullptr;
++  g_thermalStatus = ATHERMAL_STATUS_ERROR;
++}
++
++static void initialize_performance_hints() {
++  g_performanceHintLibrary = dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL);
++  if (g_performanceHintLibrary == nullptr) {
++    return;
++  }
++  const auto getManager = reinterpret_cast<GetPerformanceHintManager>(
++      dlsym(g_performanceHintLibrary, "APerformanceHint_getManager"));
++  g_createPerformanceHintSession = reinterpret_cast<CreatePerformanceHintSession>(
++      dlsym(g_performanceHintLibrary, "APerformanceHint_createSession"));
++  g_reportPerformanceHintDuration = reinterpret_cast<ReportPerformanceHintDuration>(
++      dlsym(g_performanceHintLibrary, "APerformanceHint_reportActualWorkDuration"));
++  g_closePerformanceHintSession = reinterpret_cast<ClosePerformanceHintSession>(
++      dlsym(g_performanceHintLibrary, "APerformanceHint_closeSession"));
++  if (getManager == nullptr || g_createPerformanceHintSession == nullptr ||
++      g_reportPerformanceHintDuration == nullptr || g_closePerformanceHintSession == nullptr) {
++    dlclose(g_performanceHintLibrary);
++    g_performanceHintLibrary = nullptr;
++    return;
++  }
++  g_performanceHintManager = getManager();
++}
++
++static void ensure_performance_hint_session() {
++  if (g_performanceHintManager == nullptr || g_createPerformanceHintSession == nullptr) {
++    return;
++  }
++  const int32_t threadId = gettid();
++  if (g_performanceHintSession != nullptr && threadId == g_performanceHintThread) {
++    return;
++  }
++  if (g_performanceHintSession != nullptr) {
++    g_closePerformanceHintSession(g_performanceHintSession);
++    g_performanceHintSession = nullptr;
++  }
++  constexpr int64_t TargetFrameDurationNanos = 16'666'667;
++  g_performanceHintSession =
++      g_createPerformanceHintSession(g_performanceHintManager, &threadId, 1, TargetFrameDurationNanos);
++  g_performanceHintThread = g_performanceHintSession != nullptr ? threadId : -1;
++  g_performanceHintsActive.store(g_performanceHintSession != nullptr, std::memory_order_release);
++  if (g_performanceHintSession != nullptr) {
++    Log.info("Enabled Android performance hints for render thread {}", threadId);
++  }
++}
++
++static void report_performance_hint(std::chrono::nanoseconds duration) {
++  if (g_performanceHintSession != nullptr && g_reportPerformanceHintDuration != nullptr && duration.count() > 0) {
++    g_reportPerformanceHintDuration(g_performanceHintSession, duration.count());
++  }
++}
++
++static void shutdown_performance_hints() {
++  if (g_performanceHintSession != nullptr && g_closePerformanceHintSession != nullptr) {
++    g_closePerformanceHintSession(g_performanceHintSession);
++  }
++  g_performanceHintSession = nullptr;
++  g_performanceHintManager = nullptr;
++  g_performanceHintThread = -1;
++  g_performanceHintsActive.store(false, std::memory_order_release);
++  if (g_performanceHintLibrary != nullptr) {
++    dlclose(g_performanceHintLibrary);
++  }
++  g_performanceHintLibrary = nullptr;
++  g_createPerformanceHintSession = nullptr;
++  g_reportPerformanceHintDuration = nullptr;
++  g_closePerformanceHintSession = nullptr;
++}
++#else
++static void initialize_thermal_monitor() {}
++static void shutdown_thermal_monitor() {}
++static void initialize_performance_hints() {}
++static void ensure_performance_hint_session() {}
++static void report_performance_hint(std::chrono::nanoseconds) {}
++static void shutdown_performance_hints() {}
++#endif
++
+ static SdlVfsSqliteFile* sdl_vfs_file(sqlite3_file* file) {
+   return reinterpret_cast<SdlVfsSqliteFile*>(file);
+ }
+@@ -901,6 +1113,9 @@ static void pipeline_cache_writer() {
+ #ifdef TRACY_ENABLE
+   tracy::SetThreadName("Pipeline cache writer thread");
+ #endif
++#if defined(__ANDROID__)
++  set_android_background_priority("pipeline cache writer");
++#endif
+ 
+   while (true) {
+     std::deque<PipelineCacheWrite> batch;
+@@ -985,9 +1200,15 @@ static void compile_pending_pipeline(PendingPipeline pending) {
+   }
+ }
+ 
+-static void pipeline_worker() {
++static void pipeline_worker(size_t workerIndex) {
++  const bool backgroundCapable = workerIndex < MaxBackgroundPipelineWorkers;
+ #ifdef TRACY_ENABLE
+-  tracy::SetThreadName("Pipeline compilation thread");
++  tracy::SetThreadName(backgroundCapable ? "Pipeline prewarm thread" : "Pipeline priority thread");
++#endif
++#if defined(__ANDROID__)
++  if (backgroundCapable) {
++    set_android_background_priority("pipeline prewarm");
++  }
+ #endif
+ 
+   while (true) {
+@@ -995,16 +1216,16 @@ static void pipeline_worker() {
+     bool background = false;
+     {
+       std::unique_lock lock{g_pipelineMutex};
+-      g_pipelineCv.wait(lock, [] {
++      g_pipelineCv.wait(lock, [backgroundCapable] {
+         return !g_priorityPipelines.empty() ||
+-               (!g_backgroundPipelines.empty() &&
+-                g_activeBackgroundPipelineWorkers < MaxBackgroundPipelineWorkers) ||
++               (backgroundCapable && !g_backgroundPipelines.empty() &&
++                g_activeBackgroundPipelineWorkers < g_backgroundPipelineWorkerLimit) ||
+                g_pipelineThreadEnd;
+       });
+       if (g_pipelineThreadEnd) {
+         return;
+       }
+-      background = g_priorityPipelines.empty();
++      background = g_priorityPipelines.empty() && backgroundCapable;
+       auto& source = background ? g_backgroundPipelines : g_priorityPipelines;
+       pending = std::move(source.front());
+       source.pop_front();
+@@ -1166,6 +1387,14 @@ void initialize_pipeline_cache() {
+   g_pipelineFrameActive = false;
+   g_pipelineThreadEnd = false;
+   g_activeBackgroundPipelineWorkers = 0;
++  g_backgroundPipelineWorkerLimit = MaxBackgroundPipelineWorkers;
++  g_pipelineFrameStarted = {};
++  g_lastPipelineFrameTimeMs = 0.0;
++  g_averagePipelineFrameTimeMs = 0.0;
++  g_fastPipelineFrames = 0;
++  g_backgroundCooldownFrames = 0;
++  initialize_thermal_monitor();
++  initialize_performance_hints();
+ 
+   if (webgpu::g_backendType == wgpu::BackendType::OpenGL || webgpu::g_backendType == wgpu::BackendType::OpenGLES ||
+       webgpu::g_backendType == wgpu::BackendType::WebGPU) {
+@@ -1175,7 +1404,7 @@ void initialize_pipeline_cache() {
+     const size_t workerCount = pipeline_worker_count();
+     g_pipelineThreads.reserve(workerCount);
+     for (size_t i = 0; i < workerCount; ++i) {
+-      g_pipelineThreads.emplace_back(pipeline_worker);
++      g_pipelineThreads.emplace_back(pipeline_worker, i);
+     }
+     Log.info("Enabled {} priority pipeline compilation workers ({} background prewarm)",
+              workerCount, MaxBackgroundPipelineWorkers);
+@@ -1201,6 +1430,8 @@ void shutdown_pipeline_cache() {
+   g_pipelineThreads.clear();
+   g_hasPipelineThread = false;
+   g_activeBackgroundPipelineWorkers = 0;
++  shutdown_performance_hints();
++  shutdown_thermal_monitor();
+ 
+   stop_pipeline_cache_writer();
+   pipeline_cache_abort();
+@@ -1217,14 +1448,32 @@ void shutdown_pipeline_cache() {
+ }
+ 
+ void begin_pipeline_frame() {
+-  g_pipelineFrameActive = true;
++  ensure_performance_hint_session();
++  {
++    std::lock_guard lock{g_pipelineMutex};
++    g_pipelineFrameActive = true;
++    g_pipelineFrameStarted = std::chrono::steady_clock::now();
++  }
+   if (!g_hasPipelineThread) {
+     g_pipelinesPerFrame = 0;
+   }
+ }
+ 
+ void end_pipeline_frame() {
+-  g_pipelineFrameActive = false;
++  std::chrono::nanoseconds frameTime{};
++  {
++    std::lock_guard lock{g_pipelineMutex};
++    g_pipelineFrameActive = false;
++    if (g_pipelineFrameStarted != std::chrono::steady_clock::time_point{}) {
++      frameTime = std::chrono::duration_cast<std::chrono::nanoseconds>(
++          std::chrono::steady_clock::now() - g_pipelineFrameStarted);
++      const double frameTimeMs = std::chrono::duration<double, std::milli>(frameTime).count();
++      update_background_worker_limit(frameTimeMs);
++      g_pipelineFrameStarted = {};
++    }
++  }
++  report_performance_hint(frameTime);
++  g_pipelineCv.notify_all();
+   if (!g_hasPipelineThread) {
+     build_synchronous_pipelines_for_frame();
+   }
+@@ -1244,6 +1493,21 @@ uint32_t queued_pipeline_count() noexcept {
+ #endif
+ }
+ 
++void get_pipeline_diagnostics(AuroraPipelineDiagnostics& diagnostics) noexcept {
++  std::lock_guard lock{g_pipelineMutex};
++  diagnostics = {
++      .priorityQueued = static_cast<uint32_t>(g_priorityPipelines.size()),
++      .backgroundQueued = static_cast<uint32_t>(g_backgroundPipelines.size()),
++      .activeBackgroundWorkers = static_cast<uint32_t>(g_activeBackgroundPipelineWorkers),
++      .backgroundWorkerLimit = static_cast<uint32_t>(g_backgroundPipelineWorkerLimit),
++      .lastFrameTimeMs = g_lastPipelineFrameTimeMs,
++      .averageFrameTimeMs = g_averagePipelineFrameTimeMs,
++      .thermalStatus = g_thermalStatus,
++      .prewarmActive = g_prewarmActive.load(std::memory_order_relaxed) ? 1u : 0u,
++      .performanceHintsActive = g_performanceHintsActive.load(std::memory_order_acquire) ? 1u : 0u,
++  };
++}
++
+ bool try_pipeline(PipelineRef ref, wgpu::RenderPipeline& pipeline) {
+   std::scoped_lock lock{g_pipelineMutex};
+   const auto it = g_pipelines.find(ref);
+@@ -1300,3 +1564,9 @@ void aurora_set_skip_unready_pipelines(const bool enabled) { aurora::gfx::set_sk
+ bool aurora_get_skip_unready_pipelines() { return aurora::gfx::skip_unready_pipelines(); }
+ 
+ uint32_t aurora_get_queued_pipeline_count() { return aurora::gfx::queued_pipeline_count(); }
++
++void aurora_get_pipeline_diagnostics(AuroraPipelineDiagnostics* diagnostics) {
++  if (diagnostics != nullptr) {
++    aurora::gfx::get_pipeline_diagnostics(*diagnostics);
++  }
++}
+diff --git a/aurora-main/lib/gfx/pipeline_cache.hpp b/aurora-main/lib/gfx/pipeline_cache.hpp
+index 737e531..c35f458 100644
+--- a/aurora-main/lib/gfx/pipeline_cache.hpp
++++ b/aurora-main/lib/gfx/pipeline_cache.hpp
+@@ -23,6 +23,7 @@ void end_pipeline_frame();
+ void set_skip_unready_pipelines(bool enabled) noexcept;
+ bool skip_unready_pipelines() noexcept;
+ uint32_t queued_pipeline_count() noexcept;
++void get_pipeline_diagnostics(AuroraPipelineDiagnostics& diagnostics) noexcept;
+ 
+ template <typename Config>
+ PipelineRef find_pipeline(ShaderType type, const Config& config, NewPipelineCallback&& cb);
 diff --git a/aurora-main/lib/input.cpp b/aurora-main/lib/input.cpp
 index 8884f1a..ae5be78 100644
 --- a/aurora-main/lib/input.cpp
@@ -1888,10 +2312,27 @@ index f10a290..6bc7821 100644
  extern "C" bool g_dynamicAspectRatioEnabled = false;
 +
 diff --git a/runtime/src/settings_overlay.cpp b/runtime/src/settings_overlay.cpp
-index a48415d..dc1f0cf 100644
+index a48415d..3bed542 100644
 --- a/runtime/src/settings_overlay.cpp
 +++ b/runtime/src/settings_overlay.cpp
-@@ -98,6 +98,8 @@ int g_displayMode = [] {
+@@ -63,6 +63,16 @@ const char* GraphicsApiDisplayName() {
+     return "Unknown";
+ }
+ 
++const char* ThermalStatusDisplayName(int32_t status) {
++    constexpr std::array<const char*, 7> kNames{
++        "none", "light", "moderate", "severe", "critical", "emergency", "shutdown",
++    };
++    if (status < 0 || status >= static_cast<int32_t>(kNames.size())) {
++        return "unavailable";
++    }
++    return kNames[static_cast<size_t>(status)];
++}
++
+ bool g_topBarVisible = false;
+ int g_controllerPort = 0;
+ float g_resolutionScale = RuntimeConfigFile::ResolutionMultiplier(1.0f);
+@@ -98,6 +108,8 @@ int g_displayMode = [] {
  bool g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
  bool g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
  bool g_showFps = RuntimeConfigFile::ShowFps(true);
@@ -1900,7 +2341,7 @@ index a48415d..dc1f0cf 100644
  uint32_t g_disabledPostProcessingPaths = RuntimeConfigFile::DisabledPostProcessingPaths(0);
  std::array<int32_t, PAD_MAX_CONTROLLERS> g_configuredControllerIndices = [] {
      std::array<int32_t, PAD_MAX_CONTROLLERS> indices{};
-@@ -360,6 +362,23 @@ void DrawControllerSettings() {
+@@ -360,6 +372,23 @@ void DrawControllerSettings() {
      PADButtonMapping* altMappings =
          PADGetAltButtonMappings(static_cast<uint32_t>(g_controllerPort), &altMappingCount);
  
@@ -1924,7 +2365,7 @@ index a48415d..dc1f0cf 100644
      const auto writeBinding = [](size_t index, uint32_t primaryNative, uint32_t altNative) {
          std::string value = NativeButtonForValue(primaryNative).configName;
          if (altNative != PAD_NATIVE_BUTTON_INVALID) {
-@@ -645,6 +664,23 @@ void DrawGraphicsSettings() {
+@@ -645,6 +674,34 @@ void DrawGraphicsSettings() {
      }
      ImGui::Separator();
      ImGui::Text("Graphics API: %s", GraphicsApiDisplayName());
@@ -1945,10 +2386,21 @@ index a48415d..dc1f0cf 100644
 +                               timing.latePresentCount, timing.averageDeadlineLatenessMs);
 +        }
 +    }
++    AuroraPipelineDiagnostics pipelines{};
++    aurora_get_pipeline_diagnostics(&pipelines);
++    ImGui::Text("Shader queue: %u urgent, %u prewarm; background workers %u/%u",
++                pipelines.priorityQueued, pipelines.backgroundQueued,
++                pipelines.activeBackgroundWorkers, pipelines.backgroundWorkerLimit);
++    ImGui::Text("Render window: %.2f ms latest, %.2f ms moving average",
++                pipelines.lastFrameTimeMs, pipelines.averageFrameTimeMs);
++    ImGui::Text("Thermal status: %s", ThermalStatusDisplayName(pipelines.thermalStatus));
++    ImGui::SameLine();
++    ImGui::Text("  Android performance hints: %s",
++                pipelines.performanceHintsActive != 0 ? "active" : "unavailable");
  }
  
  void DrawFpsOverlay() {
-@@ -673,6 +709,8 @@ void DrawFpsOverlay() {
+@@ -673,6 +730,8 @@ void DrawFpsOverlay() {
              // Present timing includes the additional frames produced by
              // interpolation, so this remains the actual displayed FPS.
              ImGui::Text("FPS: %.1f", presentTiming.framesPerSecond);
@@ -1957,7 +2409,19 @@ index a48415d..dc1f0cf 100644
              // Replay-unsafe frames hold the presented cadence with duplicated
              // slots, so the counter alone reads 180 while the motion on screen
              // is 60 Hz. Surface the divergence instead of hiding it.
-@@ -848,6 +886,7 @@ void PersistDisplayModeIfChanged() {
+@@ -707,6 +766,11 @@ void DrawShaderCompilationStatus() {
+     if (ImGui::Begin("Shader Compilation Status", nullptr, kFlags)) {
+         ImGui::SetWindowFontScale(0.85f);
+         ImGui::Text("%u shader%s compiling", queuedPipelines, queuedPipelines == 1 ? "" : "s");
++        AuroraPipelineDiagnostics diagnostics{};
++        aurora_get_pipeline_diagnostics(&diagnostics);
++        if (diagnostics.backgroundQueued != 0 && diagnostics.backgroundWorkerLimit == 0) {
++            ImGui::TextUnformatted("Prewarming paused to protect frame rate");
++        }
+     }
+     ImGui::End();
+     ImGui::PopStyleVar();
+@@ -848,6 +912,7 @@ void PersistDisplayModeIfChanged() {
  void InitializeRuntimeSettings() noexcept {
      controller_mapping_wizard::LoadPersistedMappings();
      ApplyConfiguredMappings();
