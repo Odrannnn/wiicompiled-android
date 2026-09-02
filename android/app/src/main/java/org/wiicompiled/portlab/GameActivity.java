@@ -9,6 +9,7 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.drawable.GradientDrawable;
 import android.view.Gravity;
+import android.view.InputDevice;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowInsets;
@@ -18,6 +19,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
 import org.libsdl.app.SDLActivity;
+import org.libsdl.app.SDLControllerManager;
 import org.libsdl.app.SDLSurface;
 
 /** Runs a private, user-built runtime in a separate process to isolate runtime globals. */
@@ -26,6 +28,8 @@ public final class GameActivity extends SDLActivity {
     private static final int PAD_Z=0x0010, PAD_R=0x0020, PAD_L=0x0040;
     private static final int PAD_A=0x0100, PAD_B=0x0200, PAD_X=0x0400, PAD_Y=0x0800, PAD_START=0x1000;
     private int virtualButtons, virtualStickX, virtualStickY;
+    private int physicalStickX, physicalStickY;
+    private boolean touchStickActive;
     private boolean virtualPadInstalled;
     private String runtimeLibrary = CodePatchRegistry.BASE_LIBRARY;
     private RuntimePackManager.Pack runtimePack;
@@ -189,8 +193,49 @@ public final class GameActivity extends SDLActivity {
     }
 
     private void resetVirtualPad() {
-        virtualButtons = virtualStickX = virtualStickY = 0;
+        virtualButtons = virtualStickX = virtualStickY = physicalStickX = physicalStickY = 0;
+        touchStickActive = false;
         publishVirtualPad();
+    }
+
+    @Override public boolean dispatchGenericMotionEvent(MotionEvent event) {
+        if ((event.getSource() & InputDevice.SOURCE_CLASS_JOYSTICK) != 0
+            && event.getActionMasked() == MotionEvent.ACTION_MOVE) {
+            // The full-screen touch overlay sits above SDL's surface. Route joystick motion
+            // explicitly, then mirror the left stick into the virtual-pad bridge. The native
+            // PAD merge ORs touch buttons but replaces the stick, so this preserves physical
+            // steering without requiring an already-generated runtime to be rebuilt.
+            boolean handled = SDLControllerManager.handleJoystickMotionEvent(event);
+            if (virtualPadInstalled) updatePhysicalStick(event);
+            return handled;
+        }
+        return super.dispatchGenericMotionEvent(event);
+    }
+
+    private void updatePhysicalStick(MotionEvent event) {
+        InputDevice device = event.getDevice();
+        if (device == null) return;
+        InputDevice.MotionRange xRange = device.getMotionRange(MotionEvent.AXIS_X);
+        InputDevice.MotionRange yRange = device.getMotionRange(MotionEvent.AXIS_Y);
+        if (xRange == null || yRange == null) return;
+        physicalStickX = Math.round(normalizeAxis(event.getAxisValue(MotionEvent.AXIS_X), xRange) * 127f);
+        physicalStickY = Math.round(-normalizeAxis(event.getAxisValue(MotionEvent.AXIS_Y), yRange) * 127f);
+        if (!touchStickActive) {
+            virtualStickX = physicalStickX;
+            virtualStickY = physicalStickY;
+            publishVirtualPad();
+        }
+    }
+
+    private static float normalizeAxis(float value, InputDevice.MotionRange range) {
+        float halfRange = range.getRange() * 0.5f;
+        if (halfRange <= 0f) return 0f;
+        float normalized = (value - (range.getMin() + halfRange)) / halfRange;
+        normalized = Math.max(-1f, Math.min(1f, normalized));
+        float deadZone = Math.max(0.12f, Math.min(0.40f, range.getFlat() / halfRange));
+        float magnitude = Math.abs(normalized);
+        if (magnitude <= deadZone) return 0f;
+        return Math.copySign((magnitude - deadZone) / (1f - deadZone), normalized);
     }
 
     private final class AnalogStickView extends View {
@@ -227,6 +272,7 @@ public final class GameActivity extends SDLActivity {
             int action = event.getActionMasked();
             if (action == MotionEvent.ACTION_DOWN) {
                 activePointer = event.getPointerId(0);
+                touchStickActive = true;
                 updateStick(event.getX(0), event.getY(0));
                 return true;
             }
@@ -239,9 +285,11 @@ public final class GameActivity extends SDLActivity {
                 (action == MotionEvent.ACTION_POINTER_UP &&
                  event.getPointerId(event.getActionIndex()) == activePointer)) {
                 activePointer = -1;
+                touchStickActive = false;
                 knobX = centerX;
                 knobY = centerY;
-                virtualStickX = virtualStickY = 0;
+                virtualStickX = physicalStickX;
+                virtualStickY = physicalStickY;
                 publishVirtualPad();
                 invalidate();
                 performClick();
