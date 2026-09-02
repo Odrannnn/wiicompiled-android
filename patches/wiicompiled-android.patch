@@ -899,7 +899,7 @@ index 737e531..c35f458 100644
  template <typename Config>
  PipelineRef find_pipeline(ShaderType type, const Config& config, NewPipelineCallback&& cb);
 diff --git a/aurora-main/lib/imgui.cpp b/aurora-main/lib/imgui.cpp
-index 15a1fe1..2ee9ef7 100644
+index 15a1fe1..36b169b 100644
 --- a/aurora-main/lib/imgui.cpp
 +++ b/aurora-main/lib/imgui.cpp
 @@ -1,5 +1,6 @@
@@ -928,7 +928,7 @@ index 15a1fe1..2ee9ef7 100644
    io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
    remove_legacy_ini_file(g_config.userPath);
    remove_legacy_ini_file(g_config.cachePath);
-@@ -132,6 +138,21 @@ void new_frame(const AuroraWindowSize& size) noexcept {
+@@ -132,6 +138,30 @@ void new_frame(const AuroraWindowSize& size) noexcept {
    };
    ImVec2 displaySize{static_cast<float>(size.width), static_cast<float>(size.height)};
  
@@ -939,7 +939,16 @@ index 15a1fe1..2ee9ef7 100644
 +    g_baseStyle = ImGui::GetStyle();
 +    g_baseStyleCaptured = true;
 +  }
-+  const float uiScale = std::clamp(size.scale > 0.0f ? size.scale : 1.0f, 1.0f, 2.25f);
++  float uiScale = size.scale > 0.0f ? size.scale : 1.0f;
++#if defined(SDL_PLATFORM_ANDROID)
++  // Several Android desktop modes expose the physical surface as the SDL
++  // logical size and report a display scale of 1. A resolution floor keeps
++  // the overlay readable and touchable on those high-resolution screens.
++  const float shortSide = static_cast<float>(std::min(size.native_fb_width, size.native_fb_height));
++  const float androidResolutionScale = std::clamp(shortSide / 540.0f, 2.0f, 3.5f);
++  uiScale = std::max(uiScale, androidResolutionScale);
++#endif
++  uiScale = std::clamp(uiScale, 1.0f, 3.5f);
 +  if (std::fabs(uiScale - g_uiScale) > 0.001f) {
 +    ImGui::GetStyle() = g_baseStyle;
 +    ImGui::GetStyle().ScaleAllSizes(uiScale);
@@ -950,7 +959,7 @@ index 15a1fe1..2ee9ef7 100644
    if (g_useSdlRenderer) {
      if (SDL_Renderer* renderer = window::get_sdl_renderer()) {
        float renderScaleX = 1.0f;
-@@ -165,7 +186,6 @@ void new_frame(const AuroraWindowSize& size) noexcept {
+@@ -165,7 +195,6 @@ void new_frame(const AuroraWindowSize& size) noexcept {
    }
    ImGui_ImplSDL3_NewFrame();
  
@@ -2496,7 +2505,7 @@ index ff7c71c..c6b03a6 100644
  // with its active Riivolution mappings. Loaded once, thread-safe.
  const std::vector<Overlay>& Overlays();
 diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
-index f10a290..6bc7821 100644
+index f10a290..128e8ea 100644
 --- a/runtime/src/main.cpp
 +++ b/runtime/src/main.cpp
 @@ -44,6 +44,7 @@
@@ -2554,7 +2563,25 @@ index f10a290..6bc7821 100644
          TranslatedFunctionRegistry::Finalize();
  
          // Initialize Aurora (graphics backend)
-@@ -1485,3 +1498,4 @@ int main(int argc, char** argv) {
+@@ -1406,12 +1419,17 @@ int RuntimeMain(int argc, char** argv) {
+         UpdateMkwDynamicAspectSurface(auroraInfo.windowSize.native_fb_width,
+                                       auroraInfo.windowSize.native_fb_height);
+         settings_overlay::InitializeRuntimeSettings();
++        AuroraSafeArea startupSafeArea{};
++        aurora_get_safe_area(&startupSafeArea);
+         RT_LOG(RT_TAG_CONFIG) << "video.widescreen=" << (configWidescreen ? "true" : "false")
+                   << " SCGetAspectRatio=" << (configWidescreen ? 1 : 0)
+                   << " resolutionMultiplier=" << resolutionMultiplier
+                   << " window=" << auroraInfo.windowSize.width << "x" << auroraInfo.windowSize.height
+                   << " native=" << auroraInfo.windowSize.native_fb_width << "x"
+                   << auroraInfo.windowSize.native_fb_height
++                  << " displayScale=" << auroraInfo.windowSize.scale
++                  << " safeArea=" << startupSafeArea.x << "," << startupSafeArea.y << "+"
++                  << startupSafeArea.width << "x" << startupSafeArea.height
+                   << " viewportPolicy=" << (g_dynamicAspectRatioEnabled ? "stretch" : "fit")
+                   << " presentAspect="
+                   << (g_dynamicAspectRatioEnabled ? "surface (dynamic EGG canvas)" : "4:3")
+@@ -1485,3 +1503,4 @@ int main(int argc, char** argv) {
      return RuntimeMain(argc, argv);
  }
  extern "C" bool g_dynamicAspectRatioEnabled = false;

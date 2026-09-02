@@ -933,9 +933,14 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
                         if (Build.VERSION.SDK_INT >= 30 /* Android 11 (R) */) {
                             window.getAttributes().layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
                         }
-                        if (Build.VERSION.SDK_INT >= 30 /* Android 11 (R) */ &&
-                            Build.VERSION.SDK_INT < 35 /* Android 15 */) {
-                            SDLActivity.onNativeInsetsChanged(0, 0, 0, 0);
+                        if (Build.VERSION.SDK_INT >= 30 /* Android 11 (R) */) {
+                            // Lenovo desktop mode and detachable keyboards can
+                            // force the system bars visible after SDL requests
+                            // fullscreen. Re-read the actual insets after the
+                            // decor flags settle instead of publishing a fake
+                            // zero safe area that puts native UI under them.
+                            View decorView = window.getDecorView();
+                            decorView.post(decorView::requestApplyInsets);
                         }
                     }
                 } else {
@@ -2227,4 +2232,3 @@ class SDLClipboardHandler implements
         SDLActivity.onNativeClipboardChanged();
     }
 }
-

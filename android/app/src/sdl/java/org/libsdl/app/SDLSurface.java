@@ -147,6 +147,9 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
         Log.v("SDL", "Device size: " + nDeviceWidth + "x" + nDeviceHeight);
         SDLActivity.nativeSetScreenResolution(width, height, nDeviceWidth, nDeviceHeight, density, mDisplay.getRefreshRate());
         SDLActivity.onNativeResize();
+        // A dock/undock can reconfigure the display without recreating this
+        // SurfaceView. Refresh SDL's native safe area after every such resize.
+        post(this::requestApplyInsets);
 
         // Prevent a screen distortion glitch,
         // for instance when the device is in Landscape and a Portrait App is resumed.
