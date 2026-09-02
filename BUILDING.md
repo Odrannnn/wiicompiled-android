@@ -151,6 +151,17 @@ On-device extraction supplies the private inputs. In the Builder edition, choose
 
 Changes inside `patches/wiicompiled-android.patch` that affect Aurora input or the runtime SDK, including controller hotplug synchronization and gyro gestures, require **Build private runtime** once after installing the updated Builder APK. The existing extracted disc, installed mods, NAND, saves, and cached compiler SDK remain in place. A rebuilt combined base/Retro Rewind pack contains the same controller runtime changes in both libraries. APK-only activity changes, such as touch layout or Android event routing, do not by themselves require regenerating the private runtime.
 
+The adaptive pipeline scheduler and renderer diagnostics are also runtime-SDK changes, so an older private runtime will continue using its old fixed prewarming policy after only an APK update. Install the new Builder, run **Build private runtime** once, and keep the existing extraction and profiles. The generated base and Retro Rewind libraries then both receive:
+
+- a one-second frame-time window with average, p95, and jitter values;
+- CPU-side surface lock, acquire, command encoding, finish, submit, pacing-wait, and present timings;
+- urgent/background shader queue and active-worker diagnostics;
+- a two-worker Android prewarm ceiling with frame-budget hysteresis;
+- Android thermal-status limits and an API-33+ performance-hint session, with automatic fallback when unsupported;
+- background priority for prewarm and SQLite cache-writer threads, while first-use workers retain normal priority.
+
+Open **Settings > Graphics** while the game is running to read the detailed values. The corner FPS overlay remains compact and shows FPS plus average and p95 frame time. A queued-shader notice explicitly says when cached prewarming is paused to protect the frame rate. These counters add no file logging by default and do not contain game data.
+
 For local split-screen, connect the gamepads and open **Settings > Controller settings**. Select Port 1 through Port 4 and assign one connected controller to each port. Assignments persist by controller identity. Motion controls are available in the same menu when SDL exposes a gyro; **Shake controller for wheelies / tricks** produces a short D-pad Up input and the threshold is adjustable in radians per second. Generic Bluetooth controllers without an exposed sensor continue to work with buttons and sticks but cannot provide this gesture.
 
 Retro Rewind builds include the production Retro-WFC payload. The Builder downloads it from the fixed `nas.play.rwfc.net` endpoint, refuses redirects, limits it to 16 MiB, checks its `WWFC/Payload` size header, and verifies its RSA/SHA-256 signature against the pinned production key before passing the private file to `translate-mod --retro-wfc-payload`. A previously verified payload is retained in app-private storage and may be reused if the service is temporarily unavailable. The Android manifest permits Java cleartext traffic only to that fixed payload host; runtime game sockets continue through the native network HLE.
