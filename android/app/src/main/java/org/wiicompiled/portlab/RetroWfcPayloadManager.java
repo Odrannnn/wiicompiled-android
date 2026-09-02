@@ -64,6 +64,17 @@ final class RetroWfcPayloadManager {
                 first = error;
             }
         }
+        if (destination.isFile()) {
+            try {
+                byte[] cached = Files.readAllBytes(destination.toPath());
+                validate(cached);
+                android.util.Log.w("WiiCompiled", "Retro-WFC endpoint unavailable; using the last signed payload", first);
+                return destination;
+            } catch (SecurityException | IOException cachedError) {
+                if (first != null) cachedError.addSuppressed(first);
+                throw new IOException("The Retro-WFC endpoint is unavailable and its cached payload is invalid", cachedError);
+            }
+        }
         throw first == null ? new IOException("Retro-WFC payload download failed") : first;
     }
 
@@ -98,7 +109,8 @@ final class RetroWfcPayloadManager {
     }
 
     private static void validate(byte[] image) throws IOException {
-        if (image.length < 0x130) throw new IOException("Retro-WFC payload has an invalid header");
+        if (image.length < 0x130 || image.length > MAX_BYTES)
+            throw new IOException("Retro-WFC payload has an invalid size");
         byte[] magic = "WWFC/Payload".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
         for (int i = 0; i < magic.length; i++)
             if (image[i] != magic[i]) throw new IOException("Retro-WFC payload has an invalid header");

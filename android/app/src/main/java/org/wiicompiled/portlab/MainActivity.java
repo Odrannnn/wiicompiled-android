@@ -138,7 +138,7 @@ public final class MainActivity extends Activity {
         });
         addCard(page, runtime);
         LinearLayout builder = card("Build on this Android device",
-            "The Builder edition translates your extracted disc and compiles a private ARM64 runtime here. When a supported Retro Rewind profile is enabled, the same build produces both required libraries. No PC or Termux is required. Keep at least 4 GiB free and connect power.");
+            "The Builder edition translates your extracted disc and compiles a private ARM64 runtime here. When a supported Retro Rewind profile is enabled, the same build produces both required libraries and securely downloads its signed WFC payload. The first online build needs Internet access. No PC or Termux is required. Keep at least 4 GiB free and connect power.");
         builderStatus = label(builder, AndroidBuilderManager.status(this), 15, Color.rgb(209, 250, 229));
         Button build = button(builder, "Build private runtime", v -> {
             if (!AndroidBuilderManager.available(this)) {
