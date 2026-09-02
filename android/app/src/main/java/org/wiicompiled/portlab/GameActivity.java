@@ -4,6 +4,7 @@ import android.os.Bundle;
 import android.os.Build;
 import android.os.PowerManager;
 import android.content.Context;
+import android.hardware.input.InputManager;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -30,12 +31,32 @@ public final class GameActivity extends SDLActivity {
     private static final int PAD_A=0x0100, PAD_B=0x0200, PAD_X=0x0400, PAD_Y=0x0800, PAD_START=0x1000;
     private int virtualButtons, virtualStickX, virtualStickY;
     private int physicalStickX, physicalStickY;
+    private int physicalStickDeviceId = -1;
+    private InputManager inputManager;
     private boolean touchStickActive;
     private boolean virtualPadInstalled;
     private String runtimeLibrary = CodePatchRegistry.BASE_LIBRARY;
     private RuntimePackManager.Pack runtimePack;
     private File runtimeFile;
     private static native void nativeSetVirtualPadState(int buttons, int stickX, int stickY);
+    private final InputManager.InputDeviceListener inputDeviceListener = new InputManager.InputDeviceListener() {
+        @Override public void onInputDeviceAdded(int deviceId) {
+            if (physicalStickDeviceId == -1 && SDLControllerManager.isDeviceSDLJoystick(deviceId)) {
+                physicalStickDeviceId = deviceId;
+            }
+        }
+        @Override public void onInputDeviceRemoved(int deviceId) {
+            if (deviceId == physicalStickDeviceId) {
+                physicalStickDeviceId = -1;
+                physicalStickX = physicalStickY = 0;
+                if (!touchStickActive) {
+                    virtualStickX = virtualStickY = 0;
+                    if (virtualPadInstalled) publishVirtualPad();
+                }
+            }
+        }
+        @Override public void onInputDeviceChanged(int deviceId) {}
+    };
 
     @Override protected SDLSurface createSDLSurface(Context context) {
         return new AuroraSurface(context);
@@ -113,6 +134,14 @@ public final class GameActivity extends SDLActivity {
     private void installTouchControls() {
         resetVirtualPad();
         virtualPadInstalled = true;
+        inputManager = getSystemService(InputManager.class);
+        if (inputManager != null) inputManager.registerInputDeviceListener(inputDeviceListener, null);
+        for (int deviceId : InputDevice.getDeviceIds()) {
+            if (SDLControllerManager.isDeviceSDLJoystick(deviceId)) {
+                physicalStickDeviceId = deviceId;
+                break;
+            }
+        }
         FrameLayout controls = new FrameLayout(this);
         controls.setClipChildren(false);
         controls.setOnApplyWindowInsetsListener((view, windowInsets) -> {
@@ -231,12 +260,11 @@ public final class GameActivity extends SDLActivity {
     @Override public boolean dispatchGenericMotionEvent(MotionEvent event) {
         if ((event.getSource() & InputDevice.SOURCE_CLASS_JOYSTICK) != 0
             && event.getActionMasked() == MotionEvent.ACTION_MOVE) {
-            // The full-screen touch overlay sits above SDL's surface. Route joystick motion
-            // explicitly, then mirror the left stick into the virtual-pad bridge. The native
-            // PAD merge ORs touch buttons but replaces the stick, so this preserves physical
-            // steering without requiring an already-generated runtime to be rebuilt.
+            // The full-screen touch overlay sits above SDL's surface, so explicitly route all
+            // devices to SDL. Only port 1's first controller is mirrored into the touch fallback;
+            // mirroring every device made a split-screen player's stick steer player 1 as well.
             boolean handled = SDLControllerManager.handleJoystickMotionEvent(event);
-            if (virtualPadInstalled) updatePhysicalStick(event);
+            if (virtualPadInstalled && event.getDeviceId() == physicalStickDeviceId) updatePhysicalStick(event);
             return handled;
         }
         return super.dispatchGenericMotionEvent(event);
@@ -374,6 +402,7 @@ public final class GameActivity extends SDLActivity {
         catch (java.io.IOException error) { throw new IllegalStateException(error); }
     }
     @Override protected void onDestroy() {
+        if (inputManager != null) inputManager.unregisterInputDeviceListener(inputDeviceListener);
         super.onDestroy();
         // This activity lives in :game; don't leave non-resettable guest globals for another run.
         android.os.Process.killProcess(android.os.Process.myPid());
