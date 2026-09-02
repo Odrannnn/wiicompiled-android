@@ -899,7 +899,7 @@ index 737e531..c35f458 100644
  template <typename Config>
  PipelineRef find_pipeline(ShaderType type, const Config& config, NewPipelineCallback&& cb);
 diff --git a/aurora-main/lib/imgui.cpp b/aurora-main/lib/imgui.cpp
-index 15a1fe1..383667d 100644
+index 15a1fe1..2ee9ef7 100644
 --- a/aurora-main/lib/imgui.cpp
 +++ b/aurora-main/lib/imgui.cpp
 @@ -1,5 +1,6 @@
@@ -909,29 +909,36 @@ index 15a1fe1..383667d 100644
  #include <cstddef>
  #include <cmath>
  #include <filesystem>
-@@ -23,6 +24,8 @@
+@@ -23,6 +24,9 @@
  
  namespace aurora::imgui {
  static float g_scale;
 +static float g_uiScale = 1.0f;
 +static ImGuiStyle g_baseStyle;
++static bool g_baseStyleCaptured = false;
  static std::string g_imguiLog{};
  static bool g_useSdlRenderer = false;
  // Set once ImGui::Render() has produced this frame's draw data. Interpolation encodes up to four
-@@ -45,6 +48,8 @@ void create_context() noexcept {
+@@ -45,6 +49,8 @@ void create_context() noexcept {
    IMGUI_CHECKVERSION();
    ImGui::CreateContext();
    ImGuiIO& io = ImGui::GetIO();
-+  g_baseStyle = ImGui::GetStyle();
++  g_baseStyleCaptured = false;
 +  g_uiScale = 0.0f;
    io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
    remove_legacy_ini_file(g_config.userPath);
    remove_legacy_ini_file(g_config.cachePath);
-@@ -132,6 +137,15 @@ void new_frame(const AuroraWindowSize& size) noexcept {
+@@ -132,6 +138,21 @@ void new_frame(const AuroraWindowSize& size) noexcept {
    };
    ImVec2 displaySize{static_cast<float>(size.width), static_cast<float>(size.height)};
  
 +  ImGuiIO& io = ImGui::GetIO();
++  if (!g_baseStyleCaptured) {
++    // Capture after the application's initialization callback has had a chance
++    // to customize the style, then always scale from this non-cumulative base.
++    g_baseStyle = ImGui::GetStyle();
++    g_baseStyleCaptured = true;
++  }
 +  const float uiScale = std::clamp(size.scale > 0.0f ? size.scale : 1.0f, 1.0f, 2.25f);
 +  if (std::fabs(uiScale - g_uiScale) > 0.001f) {
 +    ImGui::GetStyle() = g_baseStyle;
@@ -943,7 +950,7 @@ index 15a1fe1..383667d 100644
    if (g_useSdlRenderer) {
      if (SDL_Renderer* renderer = window::get_sdl_renderer()) {
        float renderScaleX = 1.0f;
-@@ -165,7 +179,6 @@ void new_frame(const AuroraWindowSize& size) noexcept {
+@@ -165,7 +186,6 @@ void new_frame(const AuroraWindowSize& size) noexcept {
    }
    ImGui_ImplSDL3_NewFrame();
  
@@ -2460,10 +2467,10 @@ index f10a290..6bc7821 100644
  extern "C" bool g_dynamicAspectRatioEnabled = false;
 +
 diff --git a/runtime/src/settings_overlay.cpp b/runtime/src/settings_overlay.cpp
-index a48415d..1a244e5 100644
+index a48415d..490760b 100644
 --- a/runtime/src/settings_overlay.cpp
 +++ b/runtime/src/settings_overlay.cpp
-@@ -63,7 +63,18 @@ const char* GraphicsApiDisplayName() {
+@@ -63,7 +63,22 @@ const char* GraphicsApiDisplayName() {
      return "Unknown";
  }
  
@@ -2479,10 +2486,14 @@ index a48415d..1a244e5 100644
 +
  bool g_topBarVisible = false;
 +float g_topBarHeight = 0.0f;
++
++float UiSize(float value) {
++    return value * std::max(1.0f, ImGui::GetIO().FontGlobalScale);
++}
  int g_controllerPort = 0;
  float g_resolutionScale = RuntimeConfigFile::ResolutionMultiplier(1.0f);
  int g_audioVolumePercent = static_cast<int>(std::lround(RuntimeConfigFile::AudioVolume(1.0f) * 100.0f));
-@@ -98,6 +109,8 @@ int g_displayMode = [] {
+@@ -98,6 +113,8 @@ int g_displayMode = [] {
  bool g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
  bool g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
  bool g_showFps = RuntimeConfigFile::ShowFps(true);
@@ -2491,7 +2502,7 @@ index a48415d..1a244e5 100644
  uint32_t g_disabledPostProcessingPaths = RuntimeConfigFile::DisabledPostProcessingPaths(0);
  std::array<int32_t, PAD_MAX_CONTROLLERS> g_configuredControllerIndices = [] {
      std::array<int32_t, PAD_MAX_CONTROLLERS> indices{};
-@@ -360,6 +373,23 @@ void DrawControllerSettings() {
+@@ -360,6 +377,23 @@ void DrawControllerSettings() {
      PADButtonMapping* altMappings =
          PADGetAltButtonMappings(static_cast<uint32_t>(g_controllerPort), &altMappingCount);
  
@@ -2502,7 +2513,7 @@ index a48415d..1a244e5 100644
 +        PADConfigureGyroTricks(g_gyroTricks ? TRUE : FALSE, g_gyroTrickThreshold);
 +        RuntimeConfigFile::SetGyroTricksEnabled(g_gyroTricks);
 +    }
-+    ImGui::SetNextItemWidth(220.0f);
++    ImGui::SetNextItemWidth(UiSize(220.0f));
 +    if (ImGui::SliderFloat("Shake sensitivity", &g_gyroTrickThreshold, 2.0f, 20.0f, "%.1f rad/s")) {
 +        PADConfigureGyroTricks(g_gyroTricks ? TRUE : FALSE, g_gyroTrickThreshold);
 +        RuntimeConfigFile::SetGyroTrickThreshold(g_gyroTrickThreshold);
@@ -2515,7 +2526,34 @@ index a48415d..1a244e5 100644
      const auto writeBinding = [](size_t index, uint32_t primaryNative, uint32_t altNative) {
          std::string value = NativeButtonForValue(primaryNative).configName;
          if (altNative != PAD_NATIVE_BUTTON_INVALID) {
-@@ -645,6 +675,34 @@ void DrawGraphicsSettings() {
+@@ -433,7 +467,7 @@ void DrawControllerSettings() {
+ 
+         const NativeButtonItem& current = NativeButtonForValue(mappingIt->nativeButton);
+         ImGui::PushID(static_cast<int>(i));
+-        ImGui::SetNextItemWidth(190.0f);
++        ImGui::SetNextItemWidth(UiSize(190.0f));
+         if (ImGui::BeginCombo("##primary", current.label)) {
+             for (const auto& candidate : kNativeButtons) {
+                 const bool selected = candidate.nativeButton == mappingIt->nativeButton;
+@@ -466,7 +500,7 @@ void DrawControllerSettings() {
+                 ImGui::TextUnformatted("or");
+                 ImGui::SameLine();
+                 const char* altLabel = altBound ? NativeButtonForValue(altIt->nativeButton).label : "None";
+-                ImGui::SetNextItemWidth(190.0f);
++                ImGui::SetNextItemWidth(UiSize(190.0f));
+                 if (ImGui::BeginCombo("##alt", altLabel)) {
+                     for (const auto& candidate : kNativeButtons) {
+                         const bool isNone = candidate.nativeButton == PAD_NATIVE_BUTTON_INVALID;
+@@ -495,7 +529,7 @@ void DrawControllerSettings() {
+ }
+ 
+ void DrawAudioSettings() {
+-    ImGui::SetNextItemWidth(220.0f);
++    ImGui::SetNextItemWidth(UiSize(220.0f));
+     if (ImGui::SliderInt("Master", &g_audioVolumePercent, 0, 100, "%d%%")) {
+         const float volume = static_cast<float>(g_audioVolumePercent) / 100.0f;
+         AudioBackend::Instance().SetMasterVolume(volume);
+@@ -645,6 +679,34 @@ void DrawGraphicsSettings() {
      }
      ImGui::Separator();
      ImGui::Text("Graphics API: %s", GraphicsApiDisplayName());
@@ -2550,7 +2588,7 @@ index a48415d..1a244e5 100644
  }
  
  void DrawFpsOverlay() {
-@@ -655,9 +713,15 @@ void DrawFpsOverlay() {
+@@ -655,9 +717,15 @@ void DrawFpsOverlay() {
      }
  
      const ImGuiIO& io = ImGui::GetIO();
@@ -2569,7 +2607,7 @@ index a48415d..1a244e5 100644
      ImGui::SetNextWindowBgAlpha(0.55f);
      constexpr ImGuiWindowFlags kFlags = ImGuiWindowFlags_AlwaysAutoResize |
                                           ImGuiWindowFlags_NoDecoration |
-@@ -673,6 +737,8 @@ void DrawFpsOverlay() {
+@@ -673,6 +741,8 @@ void DrawFpsOverlay() {
              // Present timing includes the additional frames produced by
              // interpolation, so this remains the actual displayed FPS.
              ImGui::Text("FPS: %.1f", presentTiming.framesPerSecond);
@@ -2578,7 +2616,7 @@ index a48415d..1a244e5 100644
              // Replay-unsafe frames hold the presented cadence with duplicated
              // slots, so the counter alone reads 180 while the motion on screen
              // is 60 Hz. Surface the divergence instead of hiding it.
-@@ -692,9 +758,14 @@ void DrawShaderCompilationStatus() {
+@@ -692,9 +762,14 @@ void DrawShaderCompilationStatus() {
          return;
      }
  
@@ -2596,7 +2634,7 @@ index a48415d..1a244e5 100644
      ImGui::SetNextWindowBgAlpha(0.55f);
      ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(7.0f, 4.0f));
      constexpr ImGuiWindowFlags kFlags = ImGuiWindowFlags_AlwaysAutoResize |
-@@ -707,6 +778,11 @@ void DrawShaderCompilationStatus() {
+@@ -707,6 +782,11 @@ void DrawShaderCompilationStatus() {
      if (ImGui::Begin("Shader Compilation Status", nullptr, kFlags)) {
          ImGui::SetWindowFontScale(0.85f);
          ImGui::Text("%u shader%s compiling", queuedPipelines, queuedPipelines == 1 ? "" : "s");
@@ -2608,7 +2646,7 @@ index a48415d..1a244e5 100644
      }
      ImGui::End();
      ImGui::PopStyleVar();
-@@ -745,17 +821,53 @@ void DrawStartupScreen() {
+@@ -745,17 +825,53 @@ void DrawStartupScreen() {
  }
  
  void DrawTopBar() {
@@ -2666,7 +2704,7 @@ index a48415d..1a244e5 100644
      if (ImGui::BeginMenu(resolutionMenuLabel.c_str())) {
          for (const auto& resolution : kResolutions) {
              const bool selected = std::fabs(resolution.scale - g_resolutionScale) < 0.001f;
-@@ -775,7 +887,7 @@ void DrawTopBar() {
+@@ -775,7 +891,7 @@ void DrawTopBar() {
          ImGui::EndMenu();
      }
  
@@ -2675,7 +2713,7 @@ index a48415d..1a244e5 100644
          DrawControllerSettings();
          ImGui::EndMenu();
      }
-@@ -786,7 +898,7 @@ void DrawTopBar() {
+@@ -786,7 +902,7 @@ void DrawTopBar() {
      // Keep the popup ID stable while the Master slider changes the visible
      // label. Without the ### suffix, ImGui treats every new percentage as a
      // different menu and closes the popup on the first drag update.
@@ -2684,7 +2722,7 @@ index a48415d..1a244e5 100644
      if (ImGui::BeginMenu(audioMenuLabel.c_str())) {
          DrawAudioSettings();
          ImGui::EndMenu();
-@@ -797,7 +909,9 @@ void DrawTopBar() {
+@@ -797,7 +913,9 @@ void DrawTopBar() {
      if (ImGui::MenuItem("Hide (F10)")) {
          SetTopBarVisible(false);
      }
@@ -2695,7 +2733,7 @@ index a48415d..1a244e5 100644
  }
  
  bool IsToggleKey(const SDL_Event& event, SDL_Scancode code) {
-@@ -848,6 +962,7 @@ void PersistDisplayModeIfChanged() {
+@@ -848,6 +966,7 @@ void PersistDisplayModeIfChanged() {
  void InitializeRuntimeSettings() noexcept {
      controller_mapping_wizard::LoadPersistedMappings();
      ApplyConfiguredMappings();
@@ -2703,7 +2741,7 @@ index a48415d..1a244e5 100644
      AudioBackend::Instance().SetMasterVolume(static_cast<float>(g_audioVolumePercent) / 100.0f);
      AudioBackend::Instance().SetMuted(g_audioMuted);
      MusicAttenuation::SetMusicVolume(static_cast<float>(g_musicVolumePercent) / 100.0f);
-@@ -892,15 +1007,17 @@ void HandleEvents(const AuroraEvent* events) noexcept {
+@@ -892,15 +1011,17 @@ void HandleEvents(const AuroraEvent* events) noexcept {
  void Draw() noexcept {
      // Wait for the frame worker's DONE phase: it has replayed the previous frame's ImGui draw lists
      // and started the next ImGui frame, so all overlay callers can now safely issue ImGui commands.
