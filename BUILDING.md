@@ -267,3 +267,11 @@ Run `Build-AndroidTranslator.ps1`, `Build-AndroidCompiler.ps1`, and `Build-Andro
 ### Builder stops for storage or Android kills it
 
 Free at least 4 GiB in internal app storage and connect power. Start the build again from the Play page. The current workspace is disposable; the previously activated runtime and extracted disc remain intact. Do not clear application data, because that removes the extracted disc, profiles, and private runtime.
+
+### Retro-WFC reports Wii error 20100
+
+Confirm Android itself has validated internet access and that the selected runtime profile has networking enabled. Releases before `0.3.0-alpha.9` can resolve Retro Rewind's legacy `nas.play.rwfc.net` login target to an endpoint that no longer accepts the connection; update the Builder APK and run **Build private runtime** again so the new HLE networking code is compiled into the private runtime. Installing the APK alone updates the Builder and Android Java layer but does not replace an already generated `libWiiCompiled.so` or `libRetroRewind.so`.
+
+### Overlay is tiny or hidden under a system bar
+
+Use `0.3.0-alpha.9` or newer. The Android overlay now falls back to resolution-based scaling and republishes real safe-area insets after fullscreen and display changes. The Java inset fix activates when the APK is installed; the native overlay scaling change requires **Build private runtime** once. When diagnosing a device, the runtime log's startup configuration line records `displayScale` and `safeArea`.
