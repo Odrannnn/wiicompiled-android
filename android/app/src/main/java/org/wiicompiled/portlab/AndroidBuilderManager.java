@@ -81,6 +81,12 @@ final class AndroidBuilderManager {
         copyTree(new File(sdk, "kit"), workspace);
         File retroRoot = enabledRetroRewindRoot(context);
         File stagedRetro = retroRoot == null ? null : stageRetroRewind(workspace, retroRoot);
+        File retroWfcPayload = null;
+        if (retroRoot != null) {
+            progress.update("Downloading and verifying the signed Retro-WFC payload…", 4);
+            retroWfcPayload = RetroWfcPayloadManager.download(context);
+            checkCancelled();
+        }
         File assets = new File(workspace, "Assets");
         if (!assets.mkdirs()) throw new IOException("Cannot create the private translation input directory");
         Files.copy(dol.toPath(), new File(assets, "main.dol").toPath(), StandardCopyOption.REPLACE_EXISTING);
@@ -116,7 +122,8 @@ final class AndroidBuilderManager {
                 "--base-translation-output-metadata", new File(workspace, "generated/base_translation_metadata.json"),
                 "--code-pul", new File(stagedRetro, "Binaries/Code.pul"), "--mod-root", retroRoot,
                 "--mod-name", "Retro Rewind", "--region", "P", "--out", retroOutput,
-                "--prefer-cached-inputs", "--emit-cpp", "--threads", Integer.toString(threads), "--skip-retro-wfc"));
+                "--prefer-cached-inputs", "--emit-cpp", "--threads", Integer.toString(threads),
+                "--retro-wfc-payload", retroWfcPayload));
         }
         List<Object> shardCommand = list(translator, "emit-build-shards", "--project", project,
             "--base-metadata", new File(workspace, "generated/base_translation_metadata.json"), "--base-functions-dir",
