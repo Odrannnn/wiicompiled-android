@@ -33,6 +33,29 @@ index 002344b..7a4faef 100644
  endif ()
 +
 +
+diff --git a/aurora-main/include/aurora/gfx.h b/aurora-main/include/aurora/gfx.h
+index f58252f..8b7c2f8 100644
+--- a/aurora-main/include/aurora/gfx.h
++++ b/aurora-main/include/aurora/gfx.h
+@@ -42,6 +42,18 @@ typedef struct {
+   // framesPerSecond with duplicated presentation slots scaled out, so this is the rate of frames
+   // that carried new motion. Equal to framesPerSecond when every slot replayed real interpolation.
+   double effectiveFramesPerSecond;
++  // One-second moving averages for the CPU-side surface presentation path. The work total excludes
++  // deliberate frame pacing waits, while surfaceLockWaitMs isolates contention with resize/recovery.
++  double presentationWorkMs;
++  double surfaceLockWaitMs;
++  double surfaceAcquireMs;
++  double presentationEncodeMs;
++  double commandFinishMs;
++  double queueSubmitMs;
++  double surfacePresentMs;
++  double scheduleWaitMs;
++  double averageDeadlineLatenessMs;
++  uint32_t latePresentCount;
+ } AuroraPresentTiming;
+ 
+ const AuroraStats* aurora_get_stats();
 diff --git a/aurora-main/include/dolphin/pad.h b/aurora-main/include/dolphin/pad.h
 index 6f821c3..d415f43 100644
 --- a/aurora-main/include/dolphin/pad.h
@@ -49,6 +72,137 @@ index 6f821c3..d415f43 100644
  BOOL PADSetRumbleIntensity(u32 port, u16 low, u16 high);
  BOOL PADGetRumbleIntensity(u32 port, u16* low, u16* high);
  BOOL PADSupportsRumbleIntensity(u32 port);
+diff --git a/aurora-main/lib/aurora.cpp b/aurora-main/lib/aurora.cpp
+index b679e32..a519f35 100644
+--- a/aurora-main/lib/aurora.cpp
++++ b/aurora-main/lib/aurora.cpp
+@@ -72,6 +72,14 @@ using PresentClock = std::chrono::steady_clock;
+ struct PresentTimingSample {
+   PresentClock::time_point presentedAt{};
+   std::chrono::nanoseconds interval{};
++  std::chrono::nanoseconds surfaceLockWait{};
++  std::chrono::nanoseconds acquire{};
++  std::chrono::nanoseconds encode{};
++  std::chrono::nanoseconds finish{};
++  std::chrono::nanoseconds submit{};
++  std::chrono::nanoseconds present{};
++  std::chrono::nanoseconds scheduleWait{};
++  std::chrono::nanoseconds deadlineLateness{};
+   // Slot carried a copy of the native image instead of replayed interpolation, so the present
+   // counts toward the rate but shows no new motion.
+   bool duplicated = false;
+@@ -133,13 +141,15 @@ void wait_until_precise(PresentClock::time_point deadline) noexcept {
+ }
+ 
+ void record_successful_present(bool, uint32_t,
+-                               std::chrono::nanoseconds,
+-                               std::chrono::nanoseconds,
+-                               std::chrono::nanoseconds,
+-                               std::chrono::nanoseconds,
+-                               std::chrono::nanoseconds,
+-                               std::chrono::nanoseconds, bool duplicated,
+-                               uint32_t, std::chrono::nanoseconds) noexcept {
++                               std::chrono::nanoseconds surfaceLockWait,
++                               std::chrono::nanoseconds acquire,
++                               std::chrono::nanoseconds encode,
++                               std::chrono::nanoseconds finish,
++                               std::chrono::nanoseconds submit,
++                               std::chrono::nanoseconds present,
++                               std::chrono::nanoseconds scheduleWait,
++                               bool duplicated, uint32_t,
++                               std::chrono::nanoseconds deadlineLateness) noexcept {
+   const auto now = PresentClock::now();
+   std::chrono::nanoseconds interval{};
+   {
+@@ -151,6 +161,14 @@ void record_successful_present(bool, uint32_t,
+     g_presentTimingSamples[g_presentTimingWriteIndex] = {
+         .presentedAt = now,
+         .interval = interval,
++        .surfaceLockWait = surfaceLockWait,
++        .acquire = acquire,
++        .encode = encode,
++        .finish = finish,
++        .submit = submit,
++        .present = present,
++        .scheduleWait = scheduleWait,
++        .deadlineLateness = (std::max)(deadlineLateness, std::chrono::nanoseconds::zero()),
+         .duplicated = duplicated,
+     };
+     g_presentTimingWriteIndex = (g_presentTimingWriteIndex + 1) % g_presentTimingSamples.size();
+@@ -165,6 +183,15 @@ AuroraPresentTiming snapshot_present_timing() noexcept {
+   std::vector<double> milliseconds;
+   uint64_t totalPresentCount = 0;
+   size_t newMotionSamples = 0;
++  std::chrono::nanoseconds surfaceLockWait{};
++  std::chrono::nanoseconds acquire{};
++  std::chrono::nanoseconds encode{};
++  std::chrono::nanoseconds finish{};
++  std::chrono::nanoseconds submit{};
++  std::chrono::nanoseconds present{};
++  std::chrono::nanoseconds scheduleWait{};
++  std::chrono::nanoseconds deadlineLateness{};
++  uint32_t latePresentCount = 0;
+   {
+     std::lock_guard lock(g_presentTimingMutex);
+     totalPresentCount = g_totalPresentCount;
+@@ -174,6 +201,17 @@ AuroraPresentTiming snapshot_present_timing() noexcept {
+       if (sample.presentedAt >= cutoff && sample.interval.count() > 0) {
+         milliseconds.push_back(
+             std::chrono::duration<double, std::milli>(sample.interval).count());
++        surfaceLockWait += sample.surfaceLockWait;
++        acquire += sample.acquire;
++        encode += sample.encode;
++        finish += sample.finish;
++        submit += sample.submit;
++        present += sample.present;
++        scheduleWait += sample.scheduleWait;
++        if (sample.deadlineLateness >= std::chrono::milliseconds(1)) {
++          deadlineLateness += sample.deadlineLateness;
++          ++latePresentCount;
++        }
+         if (!sample.duplicated) {
+           ++newMotionSamples;
+         }
+@@ -200,6 +238,25 @@ AuroraPresentTiming snapshot_present_timing() noexcept {
+   result.effectiveFramesPerSecond =
+       result.framesPerSecond *
+       (static_cast<double>(newMotionSamples) / static_cast<double>(milliseconds.size()));
++  const auto averageMilliseconds = [sampleCount = milliseconds.size()](std::chrono::nanoseconds value) {
++    return std::chrono::duration<double, std::milli>(value).count() /
++           static_cast<double>(sampleCount);
++  };
++  result.surfaceLockWaitMs = averageMilliseconds(surfaceLockWait);
++  result.surfaceAcquireMs = averageMilliseconds(acquire);
++  result.presentationEncodeMs = averageMilliseconds(encode);
++  result.commandFinishMs = averageMilliseconds(finish);
++  result.queueSubmitMs = averageMilliseconds(submit);
++  result.surfacePresentMs = averageMilliseconds(present);
++  result.scheduleWaitMs = averageMilliseconds(scheduleWait);
++  result.averageDeadlineLatenessMs = latePresentCount == 0
++                                         ? 0.0
++                                         : std::chrono::duration<double, std::milli>(deadlineLateness).count() /
++                                               static_cast<double>(latePresentCount);
++  result.latePresentCount = latePresentCount;
++  result.presentationWorkMs = result.surfaceAcquireMs + result.presentationEncodeMs +
++                              result.commandFinishMs + result.queueSubmitMs +
++                              result.surfacePresentMs;
+   for (const double value : milliseconds) {
+     const double difference = value - result.averageFrameTimeMs;
+     result.jitterMs += difference * difference;
+@@ -983,10 +1040,9 @@ bool present_presentation_job(const PresentationJob& job) {
+           if (presentStatus == wgpu::Status::Success) {
+             presented = true;
+             record_successful_present(
+-                job.interpolated, job.logicalFrame, acquireDuration, encodeDuration,
+-                finishDuration, submitDuration, presentDuration,
+-                std::chrono::duration_cast<std::chrono::nanoseconds>(PresentClock::now() -
+-                                                                     submissionStarted),
++                job.interpolated, job.logicalFrame, surfaceLockDuration, acquireDuration,
++                encodeDuration, finishDuration, submitDuration, presentDuration,
++                scheduleWaitDuration,
+                 job.duplicated, job.slidPeriods, lateBy);
+           } else {
+             Log.warn("Surface present failed: {}", static_cast<int>(presentStatus));
 diff --git a/aurora-main/lib/dolphin/pad/pad.cpp b/aurora-main/lib/dolphin/pad/pad.cpp
 index ff8d4c6..b1a39c9 100644
 --- a/aurora-main/lib/dolphin/pad/pad.cpp
@@ -1734,7 +1888,7 @@ index f10a290..6bc7821 100644
  extern "C" bool g_dynamicAspectRatioEnabled = false;
 +
 diff --git a/runtime/src/settings_overlay.cpp b/runtime/src/settings_overlay.cpp
-index a48415d..44fb301 100644
+index a48415d..dc1f0cf 100644
 --- a/runtime/src/settings_overlay.cpp
 +++ b/runtime/src/settings_overlay.cpp
 @@ -98,6 +98,8 @@ int g_displayMode = [] {
@@ -1770,7 +1924,40 @@ index a48415d..44fb301 100644
      const auto writeBinding = [](size_t index, uint32_t primaryNative, uint32_t altNative) {
          std::string value = NativeButtonForValue(primaryNative).configName;
          if (altNative != PAD_NATIVE_BUTTON_INVALID) {
-@@ -848,6 +867,7 @@ void PersistDisplayModeIfChanged() {
+@@ -645,6 +664,23 @@ void DrawGraphicsSettings() {
+     }
+     ImGui::Separator();
+     ImGui::Text("Graphics API: %s", GraphicsApiDisplayName());
++    AuroraPresentTiming timing{};
++    aurora_get_present_timing(&timing);
++    if (timing.sampleCount != 0) {
++        ImGui::Text("Frame: %.2f ms average, %.2f ms p95, %.2f ms jitter",
++                    timing.averageFrameTimeMs, timing.p95FrameTimeMs, timing.jitterMs);
++        ImGui::Text("Present CPU: %.2f ms work, %.2f ms paced wait",
++                    timing.presentationWorkMs, timing.scheduleWaitMs);
++        ImGui::Text("Surface: %.2f ms lock, %.2f ms acquire, %.2f ms present",
++                    timing.surfaceLockWaitMs, timing.surfaceAcquireMs, timing.surfacePresentMs);
++        ImGui::Text("Commands: %.2f ms encode, %.2f ms finish, %.2f ms submit",
++                    timing.presentationEncodeMs, timing.commandFinishMs, timing.queueSubmitMs);
++        if (timing.latePresentCount != 0) {
++            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f),
++                               "Late presents: %u (%.2f ms average lateness)",
++                               timing.latePresentCount, timing.averageDeadlineLatenessMs);
++        }
++    }
+ }
+ 
+ void DrawFpsOverlay() {
+@@ -673,6 +709,8 @@ void DrawFpsOverlay() {
+             // Present timing includes the additional frames produced by
+             // interpolation, so this remains the actual displayed FPS.
+             ImGui::Text("FPS: %.1f", presentTiming.framesPerSecond);
++            ImGui::Text("Frame: %.1f ms  p95: %.1f ms",
++                        presentTiming.averageFrameTimeMs, presentTiming.p95FrameTimeMs);
+             // Replay-unsafe frames hold the presented cadence with duplicated
+             // slots, so the counter alone reads 180 while the motion on screen
+             // is 60 Hz. Surface the divergence instead of hiding it.
+@@ -848,6 +886,7 @@ void PersistDisplayModeIfChanged() {
  void InitializeRuntimeSettings() noexcept {
      controller_mapping_wizard::LoadPersistedMappings();
      ApplyConfiguredMappings();
