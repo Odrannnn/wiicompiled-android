@@ -45,6 +45,32 @@ index ff740a7..5b3e29b 100644
 +  target_link_libraries(aurora_gx PRIVATE android)
 +endif()
  target_compile_definitions(aurora_gx PRIVATE WEBGPU_DAWN)
+diff --git a/aurora-main/include/aurora/aurora.h b/aurora-main/include/aurora/aurora.h
+index c3f70d2..24618f8 100644
+--- a/aurora-main/include/aurora/aurora.h
++++ b/aurora-main/include/aurora/aurora.h
+@@ -43,6 +43,13 @@ typedef struct {
+   int32_t y;
+ } AuroraWindowPos;
+ 
++typedef struct {
++  int32_t x;
++  int32_t y;
++  uint32_t width;
++  uint32_t height;
++} AuroraSafeArea;
++
+ typedef struct {
+   uint32_t width;
+   uint32_t height;
+@@ -161,6 +168,7 @@ void aurora_set_pause_on_focus_lost(bool value);
+ void aurora_set_background_input(bool value);
+ void aurora_set_display_mode(AuroraDisplayMode mode);
+ AuroraDisplayMode aurora_get_display_mode();
++void aurora_get_safe_area(AuroraSafeArea* area);
+ 
+ AuroraBackend aurora_get_backend();
+ const AuroraBackend* aurora_get_available_backends(size_t* count);
 diff --git a/aurora-main/include/aurora/gfx.h b/aurora-main/include/aurora/gfx.h
 index f58252f..7f3a0b6 100644
 --- a/aurora-main/include/aurora/gfx.h
@@ -107,7 +133,7 @@ index 6f821c3..d415f43 100644
  BOOL PADGetRumbleIntensity(u32 port, u16* low, u16* high);
  BOOL PADSupportsRumbleIntensity(u32 port);
 diff --git a/aurora-main/lib/aurora.cpp b/aurora-main/lib/aurora.cpp
-index b679e32..a519f35 100644
+index b679e32..cfe74b9 100644
 --- a/aurora-main/lib/aurora.cpp
 +++ b/aurora-main/lib/aurora.cpp
 @@ -72,6 +72,14 @@ using PresentClock = std::chrono::steady_clock;
@@ -237,6 +263,15 @@ index b679e32..a519f35 100644
                  job.duplicated, job.slidPeriods, lateBy);
            } else {
              Log.warn("Surface present failed: {}", static_cast<int>(presentStatus));
+@@ -1930,3 +1986,8 @@ void aurora_set_background_input(bool value) {
+ }
+ void aurora_set_display_mode(AuroraDisplayMode mode) { aurora::window::set_display_mode(mode); }
+ AuroraDisplayMode aurora_get_display_mode() { return aurora::window::get_display_mode(); }
++void aurora_get_safe_area(AuroraSafeArea* area) {
++  if (area != nullptr) {
++    *area = aurora::window::get_safe_area();
++  }
++}
 diff --git a/aurora-main/lib/dolphin/pad/pad.cpp b/aurora-main/lib/dolphin/pad/pad.cpp
 index ff8d4c6..b1a39c9 100644
 --- a/aurora-main/lib/dolphin/pad/pad.cpp
@@ -863,6 +898,59 @@ index 737e531..c35f458 100644
  
  template <typename Config>
  PipelineRef find_pipeline(ShaderType type, const Config& config, NewPipelineCallback&& cb);
+diff --git a/aurora-main/lib/imgui.cpp b/aurora-main/lib/imgui.cpp
+index 15a1fe1..383667d 100644
+--- a/aurora-main/lib/imgui.cpp
++++ b/aurora-main/lib/imgui.cpp
+@@ -1,5 +1,6 @@
+ #include "imgui.hpp"
+ 
++#include <algorithm>
+ #include <cstddef>
+ #include <cmath>
+ #include <filesystem>
+@@ -23,6 +24,8 @@
+ 
+ namespace aurora::imgui {
+ static float g_scale;
++static float g_uiScale = 1.0f;
++static ImGuiStyle g_baseStyle;
+ static std::string g_imguiLog{};
+ static bool g_useSdlRenderer = false;
+ // Set once ImGui::Render() has produced this frame's draw data. Interpolation encodes up to four
+@@ -45,6 +48,8 @@ void create_context() noexcept {
+   IMGUI_CHECKVERSION();
+   ImGui::CreateContext();
+   ImGuiIO& io = ImGui::GetIO();
++  g_baseStyle = ImGui::GetStyle();
++  g_uiScale = 0.0f;
+   io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+   remove_legacy_ini_file(g_config.userPath);
+   remove_legacy_ini_file(g_config.cachePath);
+@@ -132,6 +137,15 @@ void new_frame(const AuroraWindowSize& size) noexcept {
+   };
+   ImVec2 displaySize{static_cast<float>(size.width), static_cast<float>(size.height)};
+ 
++  ImGuiIO& io = ImGui::GetIO();
++  const float uiScale = std::clamp(size.scale > 0.0f ? size.scale : 1.0f, 1.0f, 2.25f);
++  if (std::fabs(uiScale - g_uiScale) > 0.001f) {
++    ImGui::GetStyle() = g_baseStyle;
++    ImGui::GetStyle().ScaleAllSizes(uiScale);
++    io.FontGlobalScale = uiScale;
++    g_uiScale = uiScale;
++  }
++
+   if (g_useSdlRenderer) {
+     if (SDL_Renderer* renderer = window::get_sdl_renderer()) {
+       float renderScaleX = 1.0f;
+@@ -165,7 +179,6 @@ void new_frame(const AuroraWindowSize& size) noexcept {
+   }
+   ImGui_ImplSDL3_NewFrame();
+ 
+-  ImGuiIO& io = ImGui::GetIO();
+   io.DisplayFramebufferScale = framebufferScale;
+   ImGui::GetIO().DisplaySize = displaySize;
+   ImGui::NewFrame();
 diff --git a/aurora-main/lib/input.cpp b/aurora-main/lib/input.cpp
 index 8884f1a..ae5be78 100644
 --- a/aurora-main/lib/input.cpp
@@ -1033,10 +1121,42 @@ index 1c6f24e..093d6a8 100644
  void set_mouse_scroll(float scrollX, float scrollY) noexcept;
  void get_mouse_scroll(float* scrollX, float* scrollY) noexcept;
 diff --git a/aurora-main/lib/window.cpp b/aurora-main/lib/window.cpp
-index 86649c9..2468b10 100644
+index 86649c9..b3e1cf1 100644
 --- a/aurora-main/lib/window.cpp
 +++ b/aurora-main/lib/window.cpp
-@@ -815,4 +815,9 @@ extern "C" JNIEXPORT void JNICALL Java_org_libsdl_app_SDLSurface_auroraNativeSet
+@@ -556,6 +556,31 @@ AuroraWindowSize get_window_size() {
+   };
+ }
+ 
++AuroraSafeArea get_safe_area() noexcept {
++  int windowWidth = 0;
++  int windowHeight = 0;
++  if (g_window == nullptr || !SDL_GetWindowSize(g_window, &windowWidth, &windowHeight) ||
++      windowWidth <= 0 || windowHeight <= 0) {
++    return {};
++  }
++
++  SDL_Rect safe{0, 0, windowWidth, windowHeight};
++  if (!SDL_GetWindowSafeArea(g_window, &safe) || safe.w <= 0 || safe.h <= 0) {
++    safe = {0, 0, windowWidth, windowHeight};
++  }
++
++  const int left = std::clamp(safe.x, 0, windowWidth);
++  const int top = std::clamp(safe.y, 0, windowHeight);
++  const int right = std::clamp(safe.x + safe.w, left, windowWidth);
++  const int bottom = std::clamp(safe.y + safe.h, top, windowHeight);
++  return {
++      .x = left,
++      .y = top,
++      .width = static_cast<uint32_t>(right - left),
++      .height = static_cast<uint32_t>(bottom - top),
++  };
++}
++
+ SDL_Window* get_sdl_window() { return g_window; }
+ 
+ SDL_Renderer* get_sdl_renderer() { return g_renderer; }
+@@ -815,4 +840,9 @@ extern "C" JNIEXPORT void JNICALL Java_org_libsdl_app_SDLSurface_auroraNativeSet
                                                                                               jboolean ready) {
    aurora::window::set_surface_ready(ready == JNI_TRUE);
  }
@@ -1046,6 +1166,34 @@ index 86649c9..2468b10 100644
 +  aurora::window::set_surface_ready(ready == JNI_TRUE);
 +}
  #endif
+diff --git a/aurora-main/lib/window.hpp b/aurora-main/lib/window.hpp
+index 22d249f..39bfdc7 100644
+--- a/aurora-main/lib/window.hpp
++++ b/aurora-main/lib/window.hpp
+@@ -35,6 +35,7 @@ bool create_renderer();
+ void destroy_window();
+ void show_window();
+ AuroraWindowSize get_window_size();
++AuroraSafeArea get_safe_area() noexcept;
+ const AuroraEvent* poll_events();
+ SDL_Window* get_sdl_window();
+ SDL_Renderer* get_sdl_renderer();
+diff --git a/aurora-main/tests/gx_test_stubs.cpp b/aurora-main/tests/gx_test_stubs.cpp
+index 32bf6bd..1ac0fd4 100644
+--- a/aurora-main/tests/gx_test_stubs.cpp
++++ b/aurora-main/tests/gx_test_stubs.cpp
+@@ -49,6 +49,11 @@ std::recursive_mutex& renderer_gpu_mutex() noexcept {
+ } // namespace aurora
+ 
+ extern "C" bool aurora_wait_for_frame_worker_for(uint32_t) { return true; }
++extern "C" void aurora_get_safe_area(AuroraSafeArea* area) {
++  if (area != nullptr) {
++    *area = {};
++  }
++}
+ 
+ // --- aurora::log_internal ---
+ namespace aurora {
 diff --git a/runtime/CMakeLists.txt b/runtime/CMakeLists.txt
 index 642de5f..7ef1c7d 100644
 --- a/runtime/CMakeLists.txt
@@ -2312,10 +2460,10 @@ index f10a290..6bc7821 100644
  extern "C" bool g_dynamicAspectRatioEnabled = false;
 +
 diff --git a/runtime/src/settings_overlay.cpp b/runtime/src/settings_overlay.cpp
-index a48415d..3bed542 100644
+index a48415d..1a244e5 100644
 --- a/runtime/src/settings_overlay.cpp
 +++ b/runtime/src/settings_overlay.cpp
-@@ -63,6 +63,16 @@ const char* GraphicsApiDisplayName() {
+@@ -63,7 +63,18 @@ const char* GraphicsApiDisplayName() {
      return "Unknown";
  }
  
@@ -2330,9 +2478,11 @@ index a48415d..3bed542 100644
 +}
 +
  bool g_topBarVisible = false;
++float g_topBarHeight = 0.0f;
  int g_controllerPort = 0;
  float g_resolutionScale = RuntimeConfigFile::ResolutionMultiplier(1.0f);
-@@ -98,6 +108,8 @@ int g_displayMode = [] {
+ int g_audioVolumePercent = static_cast<int>(std::lround(RuntimeConfigFile::AudioVolume(1.0f) * 100.0f));
+@@ -98,6 +109,8 @@ int g_displayMode = [] {
  bool g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
  bool g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
  bool g_showFps = RuntimeConfigFile::ShowFps(true);
@@ -2341,7 +2491,7 @@ index a48415d..3bed542 100644
  uint32_t g_disabledPostProcessingPaths = RuntimeConfigFile::DisabledPostProcessingPaths(0);
  std::array<int32_t, PAD_MAX_CONTROLLERS> g_configuredControllerIndices = [] {
      std::array<int32_t, PAD_MAX_CONTROLLERS> indices{};
-@@ -360,6 +372,23 @@ void DrawControllerSettings() {
+@@ -360,6 +373,23 @@ void DrawControllerSettings() {
      PADButtonMapping* altMappings =
          PADGetAltButtonMappings(static_cast<uint32_t>(g_controllerPort), &altMappingCount);
  
@@ -2365,7 +2515,7 @@ index a48415d..3bed542 100644
      const auto writeBinding = [](size_t index, uint32_t primaryNative, uint32_t altNative) {
          std::string value = NativeButtonForValue(primaryNative).configName;
          if (altNative != PAD_NATIVE_BUTTON_INVALID) {
-@@ -645,6 +674,34 @@ void DrawGraphicsSettings() {
+@@ -645,6 +675,34 @@ void DrawGraphicsSettings() {
      }
      ImGui::Separator();
      ImGui::Text("Graphics API: %s", GraphicsApiDisplayName());
@@ -2400,7 +2550,26 @@ index a48415d..3bed542 100644
  }
  
  void DrawFpsOverlay() {
-@@ -673,6 +730,8 @@ void DrawFpsOverlay() {
+@@ -655,9 +713,15 @@ void DrawFpsOverlay() {
+     }
+ 
+     const ImGuiIO& io = ImGui::GetIO();
+-    constexpr float kMargin = 10.0f;
+-    const float top = g_topBarVisible ? ImGui::GetFrameHeight() + kMargin : kMargin;
+-    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - kMargin, top), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
++    AuroraSafeArea safe{};
++    aurora_get_safe_area(&safe);
++    const float scale = std::max(1.0f, io.FontGlobalScale);
++    const float margin = 10.0f * scale;
++    const float safeLeft = safe.width != 0 ? static_cast<float>(safe.x) : 0.0f;
++    const float safeTop = safe.height != 0 ? static_cast<float>(safe.y) : 0.0f;
++    const float safeRight = safe.width != 0 ? safeLeft + static_cast<float>(safe.width) : io.DisplaySize.x;
++    const float top = safeTop + g_topBarHeight + margin;
++    ImGui::SetNextWindowPos(ImVec2(safeRight - margin, top), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+     ImGui::SetNextWindowBgAlpha(0.55f);
+     constexpr ImGuiWindowFlags kFlags = ImGuiWindowFlags_AlwaysAutoResize |
+                                          ImGuiWindowFlags_NoDecoration |
+@@ -673,6 +737,8 @@ void DrawFpsOverlay() {
              // Present timing includes the additional frames produced by
              // interpolation, so this remains the actual displayed FPS.
              ImGui::Text("FPS: %.1f", presentTiming.framesPerSecond);
@@ -2409,7 +2578,25 @@ index a48415d..3bed542 100644
              // Replay-unsafe frames hold the presented cadence with duplicated
              // slots, so the counter alone reads 180 while the motion on screen
              // is 60 Hz. Surface the divergence instead of hiding it.
-@@ -707,6 +766,11 @@ void DrawShaderCompilationStatus() {
+@@ -692,9 +758,14 @@ void DrawShaderCompilationStatus() {
+         return;
+     }
+ 
+-    constexpr float kMargin = 10.0f;
+-    const float top = g_topBarVisible ? ImGui::GetFrameHeight() + kMargin : kMargin;
+-    ImGui::SetNextWindowPos(ImVec2(kMargin, top), ImGuiCond_Always);
++    const ImGuiIO& io = ImGui::GetIO();
++    AuroraSafeArea safe{};
++    aurora_get_safe_area(&safe);
++    const float scale = std::max(1.0f, io.FontGlobalScale);
++    const float margin = 10.0f * scale;
++    const float safeLeft = safe.width != 0 ? static_cast<float>(safe.x) : 0.0f;
++    const float safeTop = safe.height != 0 ? static_cast<float>(safe.y) : 0.0f;
++    ImGui::SetNextWindowPos(ImVec2(safeLeft + margin, safeTop + g_topBarHeight + margin), ImGuiCond_Always);
+     ImGui::SetNextWindowBgAlpha(0.55f);
+     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(7.0f, 4.0f));
+     constexpr ImGuiWindowFlags kFlags = ImGuiWindowFlags_AlwaysAutoResize |
+@@ -707,6 +778,11 @@ void DrawShaderCompilationStatus() {
      if (ImGui::Begin("Shader Compilation Status", nullptr, kFlags)) {
          ImGui::SetWindowFontScale(0.85f);
          ImGui::Text("%u shader%s compiling", queuedPipelines, queuedPipelines == 1 ? "" : "s");
@@ -2421,7 +2608,94 @@ index a48415d..3bed542 100644
      }
      ImGui::End();
      ImGui::PopStyleVar();
-@@ -848,6 +912,7 @@ void PersistDisplayModeIfChanged() {
+@@ -745,17 +821,53 @@ void DrawStartupScreen() {
+ }
+ 
+ void DrawTopBar() {
+-    if (!g_topBarVisible || !ImGui::BeginMainMenuBar()) {
++    g_topBarHeight = 0.0f;
++    if (!g_topBarVisible) {
+         return;
+     }
+ 
+-    ImGui::TextUnformatted("WiiCompiled");
+-    ImGui::Separator();
++    const ImGuiIO& io = ImGui::GetIO();
++    AuroraSafeArea safe{};
++    aurora_get_safe_area(&safe);
++    const ImVec2 safePos{
++        safe.width != 0 ? static_cast<float>(safe.x) : 0.0f,
++        safe.height != 0 ? static_cast<float>(safe.y) : 0.0f,
++    };
++    const float safeWidth = safe.width != 0 ? static_cast<float>(safe.width) : io.DisplaySize.x;
++    const float scale = std::max(1.0f, io.FontGlobalScale);
++    const bool compact = safeWidth < 950.0f * scale;
++    const float requestedHeight = ImGui::GetFrameHeight() + ImGui::GetStyle().WindowPadding.y * 2.0f;
++    ImGui::SetNextWindowPos(safePos, ImGuiCond_Always);
++    ImGui::SetNextWindowSize(ImVec2(safeWidth, requestedHeight), ImGuiCond_Always);
++    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
++    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
++    constexpr ImGuiWindowFlags kBarFlags = ImGuiWindowFlags_MenuBar |
++                                           ImGuiWindowFlags_NoTitleBar |
++                                           ImGuiWindowFlags_NoResize |
++                                           ImGuiWindowFlags_NoMove |
++                                           ImGuiWindowFlags_NoScrollbar |
++                                           ImGuiWindowFlags_NoSavedSettings |
++                                           ImGuiWindowFlags_NoBringToFrontOnFocus;
++    const bool barVisible = ImGui::Begin("WiiCompiled Settings Bar", nullptr, kBarFlags);
++    g_topBarHeight = ImGui::GetWindowHeight();
++    const bool menuVisible = barVisible && ImGui::BeginMenuBar();
++    if (!menuVisible) {
++        ImGui::End();
++        ImGui::PopStyleVar(2);
++        return;
++    }
++
++    if (!compact) {
++        ImGui::TextUnformatted("WiiCompiled");
++        ImGui::Separator();
++    }
+     const auto resolutionIt = std::find_if(kResolutions.begin(), kResolutions.end(), [](const ResolutionItem& item) {
+         return std::fabs(item.scale - g_resolutionScale) < 0.001f;
+     });
+     const char* resolutionLabel = resolutionIt != kResolutions.end() ? resolutionIt->label : "Custom";
+-    const std::string resolutionMenuLabel = std::string("Resolution: ") + resolutionLabel;
++    const std::string resolutionMenuLabel = compact
++        ? std::string("Resolution")
++        : std::string("Resolution: ") + resolutionLabel;
+     if (ImGui::BeginMenu(resolutionMenuLabel.c_str())) {
+         for (const auto& resolution : kResolutions) {
+             const bool selected = std::fabs(resolution.scale - g_resolutionScale) < 0.001f;
+@@ -775,7 +887,7 @@ void DrawTopBar() {
+         ImGui::EndMenu();
+     }
+ 
+-    if (ImGui::BeginMenu("Controller settings")) {
++    if (ImGui::BeginMenu(compact ? "Controllers" : "Controller settings")) {
+         DrawControllerSettings();
+         ImGui::EndMenu();
+     }
+@@ -786,7 +898,7 @@ void DrawTopBar() {
+     // Keep the popup ID stable while the Master slider changes the visible
+     // label. Without the ### suffix, ImGui treats every new percentage as a
+     // different menu and closes the popup on the first drag update.
+-    const std::string audioMenuLabel = audioLabel + "###AudioSettingsMenu";
++    const std::string audioMenuLabel = (compact ? std::string("Audio") : audioLabel) + "###AudioSettingsMenu";
+     if (ImGui::BeginMenu(audioMenuLabel.c_str())) {
+         DrawAudioSettings();
+         ImGui::EndMenu();
+@@ -797,7 +909,9 @@ void DrawTopBar() {
+     if (ImGui::MenuItem("Hide (F10)")) {
+         SetTopBarVisible(false);
+     }
+-    ImGui::EndMainMenuBar();
++    ImGui::EndMenuBar();
++    ImGui::End();
++    ImGui::PopStyleVar(2);
+ }
+ 
+ bool IsToggleKey(const SDL_Event& event, SDL_Scancode code) {
+@@ -848,6 +962,7 @@ void PersistDisplayModeIfChanged() {
  void InitializeRuntimeSettings() noexcept {
      controller_mapping_wizard::LoadPersistedMappings();
      ApplyConfiguredMappings();
@@ -2429,6 +2703,26 @@ index a48415d..3bed542 100644
      AudioBackend::Instance().SetMasterVolume(static_cast<float>(g_audioVolumePercent) / 100.0f);
      AudioBackend::Instance().SetMuted(g_audioMuted);
      MusicAttenuation::SetMusicVolume(static_cast<float>(g_musicVolumePercent) / 100.0f);
+@@ -892,15 +1007,17 @@ void HandleEvents(const AuroraEvent* events) noexcept {
+ void Draw() noexcept {
+     // Wait for the frame worker's DONE phase: it has replayed the previous frame's ImGui draw lists
+     // and started the next ImGui frame, so all overlay callers can now safely issue ImGui commands.
+-    aurora_wait_for_frame_worker();
++    if (!aurora_wait_for_frame_worker_for(50000) || ImGui::GetCurrentContext() == nullptr) {
++        return;
++    }
+     ApplyConfiguredMappings();
+     PersistDisplayModeIfChanged();
+     UpdateCursorAutoHide();
++    DrawTopBar();
+     if (!StartupScreenVisible()) {
+         DrawShaderCompilationStatus();
+     }
+     DrawFpsOverlay();
+-    DrawTopBar();
+     controller_mapping_wizard::Draw();
+     // The wizard captures raw presses; keep them out of the game.
+     PADBlockInput(controller_mapping_wizard::IsActive());
 diff --git a/runtime/third_party/libco/android.c b/runtime/third_party/libco/android.c
 new file mode 100644
 index 0000000..fa89893
