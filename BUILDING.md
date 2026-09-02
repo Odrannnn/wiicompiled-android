@@ -127,7 +127,7 @@ The script builds four game-free payloads and then signs `artifacts/WiiCompiled-
 
 The compiler executables are stored as APK native libraries so Android extracts them onto an executable, signed application path. The app creates private symlinks named `clang++` and `ld.lld`; it never executes a binary copied into writable storage. The SDK stays zipped in the APK and is expanded into app-private storage on the first build. This avoids Android's writable-code execution restrictions and avoids Termux's package-name-specific prefix.
 
-The verified `0.3.0-alpha.4` debug Builder APK is 232,024,326 bytes (221.3 MiB). Its SHA-256 is `715dbb8ab75ff2b2dd0c10cc74c12514f7a87444508d043ec1a6a1e88c0f8d85`. Size changes when the pinned tools or runtime closure changes, so use the size printed by the build script as authoritative for later releases.
+The verified `0.3.0-alpha.5` debug Builder APK is 232,025,218 bytes (221.3 MiB). Its SHA-256 is `6dd086b5b3961ba80c94318fdb0e7ecd2f58157de8a0109330126e73fab5c13c`. Size changes when the pinned tools or runtime closure changes, so use the size printed by the build script as authoritative for later releases.
 
 ## On-device disc extraction
 
