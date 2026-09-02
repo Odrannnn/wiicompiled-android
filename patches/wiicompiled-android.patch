@@ -3471,6 +3471,132 @@ index 08ce2dc..e99d4c0 100644
      }
  
      private static void Validate(BaseTranslationOutputMetadata metadata, string source)
+diff --git a/translator/src/Translator.Core/Mods/Mkwii/RetroWfcPayload.cs b/translator/src/Translator.Core/Mods/Mkwii/RetroWfcPayload.cs
+index ddefe71..011c2e6 100644
+--- a/translator/src/Translator.Core/Mods/Mkwii/RetroWfcPayload.cs
++++ b/translator/src/Translator.Core/Mods/Mkwii/RetroWfcPayload.cs
+@@ -1,6 +1,6 @@
+ using System.Buffers.Binary;
+ using System.Text;
+-using System.Text.Json;
++using System.Text.Json.Nodes;
+ using Translator.Core.Loading;
+ 
+ namespace Translator.Core.Mods.Mkwii;
+@@ -114,7 +114,7 @@ public static class RetroWfcPayload
+ 
+         var helperModuleBase = checked(moduleGuestBase + helperModuleOffset);
+         var semanticTargets = new Dictionary<string, RetroWfcSemanticActionTarget>(StringComparer.Ordinal);
+-        var contractRecords = new List<Dictionary<string, object?>>();
++        var contractRecords = new List<JsonObject>();
+         var pendingBranchBacks = new List<PendingBranchBack>();
+         var recordCount = checked((int)((patchEnd - patchStart) / PatchRecordSize));
+ 
+@@ -193,7 +193,12 @@ public static class RetroWfcPayload
+             constructorsEnd,
+             executableStart,
+             executableEnd);
+-        var contractJson = JsonSerializer.Serialize(new { patchRecords = contractRecords });
++        var patchRecords = new JsonArray();
++        foreach (var record in contractRecords)
++        {
++            patchRecords.Add(record);
++        }
++        var contractJson = new JsonObject { ["patchRecords"] = patchRecords }.ToJsonString();
+         var loweringPlan = RetroWfcContractLoweringPlanner.Build(
+             contractJson,
+             baseManifest,
+@@ -228,7 +233,7 @@ public static class RetroWfcPayload
+ 
+     private static void AddStaticBytePatch(
+         byte[] payloadImage,
+-        List<Dictionary<string, object?>> records,
++        List<JsonObject> records,
+         int index,
+         uint address,
+         uint sourceOffset,
+@@ -236,22 +241,22 @@ public static class RetroWfcPayload
+     {
+         RequireRange(payloadImage, sourceOffset, size, $"patch #{index} source bytes");
+         var bytes = payloadImage.AsSpan(checked((int)sourceOffset), checked((int)size));
+-        records.Add(new Dictionary<string, object?>
++        records.Add(new JsonObject
+         {
+             ["index"] = index,
+             ["intent"] = "staticBytes",
+             ["typeName"] = "write",
+             ["address"] = $"0x{address:X8}",
+-            ["sourceBytes"] = new
++            ["sourceBytes"] = new JsonObject
+             {
+-                kind = "payloadSlice",
+-                hex = ChecksumUtilities.ToHex(bytes),
+-                sha256 = ChecksumUtilities.Sha256Hex(bytes),
++                ["kind"] = "payloadSlice",
++                ["hex"] = ChecksumUtilities.ToHex(bytes),
++                ["sha256"] = ChecksumUtilities.Sha256Hex(bytes),
+             },
+-            ["target"] = new
++            ["target"] = new JsonObject
+             {
+-                resolvedBy = "sourceBytes",
+-                resolutionRequired = false,
++                ["resolvedBy"] = "sourceBytes",
++                ["resolutionRequired"] = false,
+             },
+         });
+     }
+@@ -260,7 +265,7 @@ public static class RetroWfcPayload
+         byte[] payloadImage,
+         BaseManifest baseManifest,
+         Dictionary<string, RetroWfcSemanticActionTarget> semanticTargets,
+-        List<Dictionary<string, object?>> records,
++        List<JsonObject> records,
+         List<PendingBranchBack> pendingBranchBacks,
+         int index,
+         byte type,
+@@ -311,14 +316,14 @@ public static class RetroWfcPayload
+             5 => ("executableCtrCall", "branchCtrLink", 4),
+             _ => throw new InvalidOperationException(),
+         };
+-        records.Add(new Dictionary<string, object?>
++        records.Add(new JsonObject
+         {
+             ["index"] = index,
+             ["intent"] = intent,
+             ["typeName"] = typeName,
+             ["address"] = $"0x{address:X8}",
+             ["instructionCount"] = instructionCount,
+-            ["semanticActionIds"] = new[] { actionId },
++            ["semanticActionIds"] = new JsonArray { actionId },
+         });
+     }
+ 
+@@ -326,7 +331,7 @@ public static class RetroWfcPayload
+         byte[] payloadImage,
+         BaseManifest baseManifest,
+         Dictionary<string, RetroWfcSemanticActionTarget> semanticTargets,
+-        List<Dictionary<string, object?>> records,
++        List<JsonObject> records,
+         int index,
+         uint address,
+         uint targetValue,
+@@ -349,13 +354,13 @@ public static class RetroWfcPayload
+         semanticTargets.Add(
+             actionId,
+             new RetroWfcSemanticActionTarget(actionId, targetKind, targetAddress, moduleOffset, null, "wwfc-payload"));
+-        records.Add(new Dictionary<string, object?>
++        records.Add(new JsonObject
+         {
+             ["index"] = index,
+             ["intent"] = "staticPointer",
+             ["typeName"] = "writePointer",
+             ["address"] = $"0x{address:X8}",
+-            ["semanticActionIds"] = new[] { actionId },
++            ["semanticActionIds"] = new JsonArray { actionId },
+         });
+     }
+ 
 diff --git a/translator/src/Translator.Core/Mods/OverlayFunctionBuilder.cs b/translator/src/Translator.Core/Mods/OverlayFunctionBuilder.cs
 index 26a7758..399e348 100644
 --- a/translator/src/Translator.Core/Mods/OverlayFunctionBuilder.cs
