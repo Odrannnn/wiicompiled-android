@@ -33,11 +33,33 @@ index 002344b..7a4faef 100644
  endif ()
 +
 +
+diff --git a/aurora-main/include/dolphin/pad.h b/aurora-main/include/dolphin/pad.h
+index 6f821c3..d415f43 100644
+--- a/aurora-main/include/dolphin/pad.h
++++ b/aurora-main/include/dolphin/pad.h
+@@ -273,6 +273,11 @@ BOOL PADHasSensor(u32 port, PADSensorType sensor);
+ 
+ BOOL PADGetSensorData(u32 port, PADSensorType sensor, f32* data, int nValues);
+ 
++/* Convert a quick controller rotation into a short D-pad Up press for MKW
++ * wheelies and tricks. The threshold is measured in radians per second. */
++void PADConfigureGyroTricks(BOOL enabled, f32 threshold);
++BOOL PADHasGyroForTricks(u32 port);
++
+ BOOL PADSetRumbleIntensity(u32 port, u16 low, u16 high);
+ BOOL PADGetRumbleIntensity(u32 port, u16* low, u16* high);
+ BOOL PADSupportsRumbleIntensity(u32 port);
 diff --git a/aurora-main/lib/dolphin/pad/pad.cpp b/aurora-main/lib/dolphin/pad/pad.cpp
-index ff8d4c6..8d1b461 100644
+index ff8d4c6..b1a39c9 100644
 --- a/aurora-main/lib/dolphin/pad/pad.cpp
 +++ b/aurora-main/lib/dolphin/pad/pad.cpp
-@@ -9,6 +9,9 @@
+@@ -4,11 +4,15 @@
+ #include <dolphin/pad.h>
+ #include <dolphin/si.h>
+ #include <SDL3/SDL_mouse.h>
++#include <SDL3/SDL_timer.h>
+ 
+ #include <array>
  #include <atomic>
  #include <sys/stat.h>
  #include <ranges>
@@ -47,21 +69,26 @@ index ff8d4c6..8d1b461 100644
  
  namespace {
  constexpr int32_t k_mappingsFileVersion = 3;
-@@ -250,6 +253,13 @@ struct PADKeyboardState {
+@@ -249,6 +253,18 @@ struct PADKeyboardState {
+ };
  
  std::array<PADKeyboardState, PAD_MAX_CONTROLLERS> g_keyboardBindings;
- 
++std::atomic_bool g_gyroTricksEnabled{true};
++std::atomic<float> g_gyroTrickThreshold{6.0f};
++
++constexpr Uint64 kGyroTrickPulseMs = 140;
++constexpr Uint64 kGyroTrickCooldownMs = 450;
++
 +#if defined(SDL_PLATFORM_ANDROID)
 +std::atomic_bool g_androidVirtualPadEnabled{false};
 +std::atomic<uint16_t> g_androidVirtualPadButtons{0};
 +std::atomic<int8_t> g_androidVirtualPadStickX{0};
 +std::atomic<int8_t> g_androidVirtualPadStickY{0};
 +#endif
-+
+ 
  struct PADCLampRegion {
    uint8_t minTrigger;
-   uint8_t maxTrigger;
-@@ -331,6 +341,7 @@ void PADSetAnalogMode(u32 mode [[maybe_unused]]) {}
+@@ -331,6 +347,7 @@ void PADSetAnalogMode(u32 mode [[maybe_unused]]) {}
  
  aurora::input::GameController* __PADGetControllerForIndex(const u32 idx) /*  NOLINT(*-reserved-identifier) */
  {
@@ -69,7 +96,7 @@ index ff8d4c6..8d1b461 100644
    if (idx >= aurora::input::g_GameControllers.size()) {
      return nullptr;
    }
-@@ -348,7 +359,10 @@ aurora::input::GameController* __PADGetControllerForIndex(const u32 idx) /*  NOL
+@@ -348,7 +365,10 @@ aurora::input::GameController* __PADGetControllerForIndex(const u32 idx) /*  NOL
    return &iter->second;
  }
  
@@ -81,7 +108,7 @@ index ff8d4c6..8d1b461 100644
  
  const char* PADGetNameForControllerIndex(const u32 idx) {
    const auto* ctrl = __PADGetControllerForIndex(idx);
-@@ -360,6 +374,7 @@ const char* PADGetNameForControllerIndex(const u32 idx) {
+@@ -360,6 +380,7 @@ const char* PADGetNameForControllerIndex(const u32 idx) {
  }
  
  void PADSetPortForIndex(const u32 idx, const u32 port) {
@@ -89,7 +116,7 @@ index ff8d4c6..8d1b461 100644
    const auto* ctrl = __PADGetControllerForIndex(idx);
    if (ctrl == nullptr) {
      return;
-@@ -377,6 +392,7 @@ void PADSetPortForIndex(const u32 idx, const u32 port) {
+@@ -377,6 +398,7 @@ void PADSetPortForIndex(const u32 idx, const u32 port) {
  }
  
  int32_t PADGetIndexForPort(const u32 port) {
@@ -97,7 +124,7 @@ index ff8d4c6..8d1b461 100644
    const auto* ctrl = aurora::input::get_controller_for_player(port);
    if (ctrl == nullptr) {
      return -1;
-@@ -393,6 +409,7 @@ int32_t PADGetIndexForPort(const u32 port) {
+@@ -393,6 +415,7 @@ int32_t PADGetIndexForPort(const u32 port) {
  }
  
  void PADClearPort(const u32 port) {
@@ -105,9 +132,42 @@ index ff8d4c6..8d1b461 100644
    aurora::input::persist_controller_for_player(port, nullptr);
    const auto* ctrl = aurora::input::get_controller_for_player(port);
    if (ctrl == nullptr) {
-@@ -655,6 +672,9 @@ static void apply_unblock_suppression(PADStatus& status, const u32 port, const b
+@@ -654,7 +677,42 @@ static void apply_unblock_suppression(PADStatus& status, const u32 port, const b
+   }
  }
  
++static void apply_gyro_trick(aurora::input::GameController& controller, PADStatus& status) {
++  if (controller.m_gyroSensor == SDL_SENSOR_INVALID) {
++    return;
++  }
++
++  const bool requested = g_gyroTricksEnabled.load(std::memory_order_relaxed);
++  if (requested != controller.m_gyroSensorEnabled) {
++    if (SDL_SetGamepadSensorEnabled(controller.m_controller, controller.m_gyroSensor, requested)) {
++      controller.m_gyroSensorEnabled = requested;
++    }
++    controller.m_gyroTrickPulseUntil = 0;
++    controller.m_gyroTrickCooldownUntil = 0;
++  }
++  if (!controller.m_gyroSensorEnabled) {
++    return;
++  }
++
++  const Uint64 now = SDL_GetTicks();
++  float gyro[3]{};
++  if (SDL_GetGamepadSensorData(controller.m_controller, controller.m_gyroSensor, gyro, 3)) {
++    const float magnitude = std::sqrt(gyro[0] * gyro[0] + gyro[1] * gyro[1] + gyro[2] * gyro[2]);
++    if (magnitude >= g_gyroTrickThreshold.load(std::memory_order_relaxed) &&
++        now >= controller.m_gyroTrickCooldownUntil) {
++      controller.m_gyroTrickPulseUntil = now + kGyroTrickPulseMs;
++      controller.m_gyroTrickCooldownUntil = now + kGyroTrickCooldownMs;
++    }
++  }
++  if (now < controller.m_gyroTrickPulseUntil) {
++    status.button |= PAD_BUTTON_UP;
++  }
++}
++
  u32 PADRead(PADStatus* status) {
 +  // The window thread owns controller hotplug events. Keep every SDL_Gamepad
 +  // used by this frame alive until all four ports have finished reading.
@@ -115,7 +175,7 @@ index ff8d4c6..8d1b461 100644
    if (!g_keyboardBindingsLoaded) {
      g_keyboardBindingsLoaded = true;
      load_keyboard_bindings();
-@@ -670,7 +690,12 @@ u32 PADRead(PADStatus* status) {
+@@ -670,7 +728,12 @@ u32 PADRead(PADStatus* status) {
    for (uint32_t i = 0; i < PAD_CHANMAX; ++i) {
      memset(&status[i], 0, sizeof(PADStatus));
      auto controller = aurora::input::get_controller_for_player(i);
@@ -129,7 +189,16 @@ index ff8d4c6..8d1b461 100644
        status[i].err = PAD_ERR_NO_CONTROLLER;
        g_suppressedButtons[i] = 0;
        g_suppressLeftTrigger[i] = false;
-@@ -886,6 +911,15 @@ u32 PADRead(PADStatus* status) {
+@@ -873,6 +936,8 @@ u32 PADRead(PADStatus* status) {
+       status[i].triggerLeft = static_cast<int8_t>(tl);
+       status[i].triggerRight = static_cast<int8_t>(tr);
+ 
++      apply_gyro_trick(*controller, status[i]);
++
+       if (controller->m_hasRumble) {
+         rumbleSupport |= PAD_CHAN0_BIT >> i;
+       }
+@@ -886,6 +951,15 @@ u32 PADRead(PADStatus* status) {
        }
      }
  
@@ -145,7 +214,7 @@ index ff8d4c6..8d1b461 100644
      if (inputBlocked) {
        neutralize_status(status[i]);
      } else {
-@@ -895,6 +929,19 @@ u32 PADRead(PADStatus* status) {
+@@ -895,6 +969,19 @@ u32 PADRead(PADStatus* status) {
    return rumbleSupport;
  }
  
@@ -165,7 +234,7 @@ index ff8d4c6..8d1b461 100644
  void PADControlMotor(const u32 chan, const u32 cmd) {
    const auto controller = aurora::input::get_controller_for_player(chan);
    const auto instance = aurora::input::get_instance_for_player(chan);
-@@ -1349,6 +1396,7 @@ void __PADWriteDeadZones(SDL_IOStream* file, // NOLINT(*-reserved-identifier)
+@@ -1349,6 +1436,7 @@ void __PADWriteDeadZones(SDL_IOStream* file, // NOLINT(*-reserved-identifier)
  }
  
  void PADSerializeMappings() {
@@ -173,6 +242,24 @@ index ff8d4c6..8d1b461 100644
    const std::filesystem::path basePath = fs_path_from_string(aurora::g_config.userPath);
  
    for (auto& controller : aurora::input::g_GameControllers | std::views::values) {
+@@ -1653,6 +1741,17 @@ BOOL PADGetSensorData(const u32 port, const PADSensorType sensor, f32* data, con
+   return SDL_GetGamepadSensorData(ctrl->m_controller, static_cast<SDL_SensorType>(sensor), data, nValues);
+ }
+ 
++void PADConfigureGyroTricks(const BOOL enabled, const f32 threshold) {
++  g_gyroTricksEnabled.store(enabled != FALSE, std::memory_order_relaxed);
++  g_gyroTrickThreshold.store(std::clamp(threshold, 2.0f, 20.0f), std::memory_order_relaxed);
++}
++
++BOOL PADHasGyroForTricks(const u32 port) {
++  const std::lock_guard lock(aurora::input::g_GameControllersMutex);
++  const auto* ctrl = aurora::input::get_controller_for_player(port);
++  return ctrl != nullptr && ctrl->m_gyroSensor != SDL_SENSOR_INVALID ? TRUE : FALSE;
++}
++
+ BOOL PADSetRumbleIntensity(const u32 port, const u16 low, const u16 high) {
+   auto* ctrl = aurora::input::get_controller_for_player(port);
+   if (ctrl == nullptr || ctrl->m_isGameCube || !ctrl->m_hasRumble) {
 diff --git a/aurora-main/lib/gfx/pipeline_cache.cpp b/aurora-main/lib/gfx/pipeline_cache.cpp
 index b0c94d4..82f660c 100644
 --- a/aurora-main/lib/gfx/pipeline_cache.cpp
@@ -199,7 +286,7 @@ index b0c94d4..82f660c 100644
  #ifdef NDEBUG
  constexpr size_t BuildPipelinesPerFrame = 5;
 diff --git a/aurora-main/lib/input.cpp b/aurora-main/lib/input.cpp
-index 8884f1a..595b65c 100644
+index 8884f1a..ae5be78 100644
 --- a/aurora-main/lib/input.cpp
 +++ b/aurora-main/lib/input.cpp
 @@ -20,6 +20,7 @@ using namespace std::string_view_literals;
@@ -234,7 +321,21 @@ index 8884f1a..595b65c 100644
    if (g_GameControllers.contains(which)) {
      return which;
    }
-@@ -419,6 +423,7 @@ SDL_JoystickID add_controller(SDL_JoystickID which) noexcept {
+@@ -408,6 +412,13 @@ SDL_JoystickID add_controller(SDL_JoystickID which) noexcept {
+     const auto props = SDL_GetGamepadProperties(ctrl);
+     controller.m_hasRumble = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, true);
+     controller.m_hasRgbLed = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RGB_LED_BOOLEAN, false);
++    static constexpr std::array kGyroSensors{SDL_SENSOR_GYRO, SDL_SENSOR_GYRO_L, SDL_SENSOR_GYRO_R};
++    for (const SDL_SensorType sensor : kGyroSensors) {
++      if (SDL_GamepadHasSensor(ctrl, sensor)) {
++        controller.m_gyroSensor = sensor;
++        break;
++      }
++    }
+     SDL_JoystickID instance = SDL_GetJoystickID(SDL_GetGamepadJoystick(ctrl));
+     g_GameControllers[instance] = controller;
+     ensure_player_index(g_GameControllers[instance]);
+@@ -419,6 +430,7 @@ SDL_JoystickID add_controller(SDL_JoystickID which) noexcept {
  }
  
  bool refresh_controller(SDL_JoystickID instance) noexcept {
@@ -242,7 +343,7 @@ index 8884f1a..595b65c 100644
    const auto it = g_GameControllers.find(instance);
    if (it == g_GameControllers.end()) {
      return false;
-@@ -432,6 +437,7 @@ bool refresh_controller(SDL_JoystickID instance) noexcept {
+@@ -432,6 +444,7 @@ bool refresh_controller(SDL_JoystickID instance) noexcept {
  }
  
  void remove_controller(Uint32 instance) noexcept {
@@ -250,7 +351,7 @@ index 8884f1a..595b65c 100644
    if (auto it = g_GameControllers.find(instance); it != g_GameControllers.end()) {
      SDL_CloseGamepad(it->second.m_controller);
      g_GameControllers.erase(it);
-@@ -440,6 +446,7 @@ void remove_controller(Uint32 instance) noexcept {
+@@ -440,6 +453,7 @@ void remove_controller(Uint32 instance) noexcept {
  }
  
  bool is_gamecube(Uint32 instance) noexcept {
@@ -258,7 +359,7 @@ index 8884f1a..595b65c 100644
    if (auto it = g_GameControllers.find(instance); it != g_GameControllers.end()) {
      return it->second.m_isGameCube;
    }
-@@ -447,6 +454,7 @@ bool is_gamecube(Uint32 instance) noexcept {
+@@ -447,6 +461,7 @@ bool is_gamecube(Uint32 instance) noexcept {
  }
  
  int32_t player_index(Uint32 instance) noexcept {
@@ -266,7 +367,7 @@ index 8884f1a..595b65c 100644
    if (auto it = g_GameControllers.find(instance); it != g_GameControllers.end()) {
      const int player = SDL_GetGamepadPlayerIndex(it->second.m_controller);
      return player >= 0 ? player : it->second.m_playerIndex;
-@@ -455,6 +463,7 @@ int32_t player_index(Uint32 instance) noexcept {
+@@ -455,6 +470,7 @@ int32_t player_index(Uint32 instance) noexcept {
  }
  
  void set_player_index(Uint32 instance, Sint32 index) noexcept {
@@ -274,7 +375,7 @@ index 8884f1a..595b65c 100644
    if (auto it = g_GameControllers.find(instance); it != g_GameControllers.end()) {
      SDL_SetGamepadPlayerIndex(it->second.m_controller, index);
      it->second.m_playerIndex = index;
-@@ -462,6 +471,7 @@ void set_player_index(Uint32 instance, Sint32 index) noexcept {
+@@ -462,6 +478,7 @@ void set_player_index(Uint32 instance, Sint32 index) noexcept {
  }
  
  std::string controller_name(Uint32 instance) noexcept {
@@ -282,7 +383,7 @@ index 8884f1a..595b65c 100644
    if (auto it = g_GameControllers.find(instance); it != g_GameControllers.end()) {
      const auto* name = SDL_GetGamepadName(it->second.m_controller);
      if (name != nullptr) {
-@@ -472,6 +482,7 @@ std::string controller_name(Uint32 instance) noexcept {
+@@ -472,6 +489,7 @@ std::string controller_name(Uint32 instance) noexcept {
  }
  
  bool controller_has_rumble(Uint32 instance) noexcept {
@@ -290,7 +391,7 @@ index 8884f1a..595b65c 100644
    if (auto it = g_GameControllers.find(instance); it != g_GameControllers.end()) {
      return it->second.m_hasRumble;
    }
-@@ -480,14 +491,19 @@ bool controller_has_rumble(Uint32 instance) noexcept {
+@@ -480,14 +498,19 @@ bool controller_has_rumble(Uint32 instance) noexcept {
  
  void controller_rumble(uint32_t instance, uint16_t low_freq_intensity, uint16_t high_freq_intensity,
                         uint16_t duration_ms) noexcept {
@@ -311,7 +412,7 @@ index 8884f1a..595b65c 100644
    if (player >= PAD_MAX_CONTROLLERS) {
      return;
    }
-@@ -528,6 +544,7 @@ void get_mouse_scroll(float* scrollX, float* scrollY) noexcept {
+@@ -528,6 +551,7 @@ void get_mouse_scroll(float* scrollX, float* scrollY) noexcept {
  }
  
  void shutdown() noexcept {
@@ -320,7 +421,7 @@ index 8884f1a..595b65c 100644
    // to shut off their rumble motors.
    for (const auto& controller : g_GameControllers) {
 diff --git a/aurora-main/lib/input.hpp b/aurora-main/lib/input.hpp
-index 1c6f24e..d9dd1f2 100644
+index 1c6f24e..093d6a8 100644
 --- a/aurora-main/lib/input.hpp
 +++ b/aurora-main/lib/input.hpp
 @@ -2,6 +2,7 @@
@@ -331,7 +432,18 @@ index 1c6f24e..d9dd1f2 100644
  #include "dolphin/pad.h" // For PADDeaZones and PADButtonMapping
  #include "SDL3/SDL_gamepad.h"
  #include "SDL3/SDL_keyboard.h"
-@@ -64,6 +65,10 @@ uint32_t controller_count() noexcept;
+@@ -46,6 +47,10 @@ struct GameController {
+   uint8_t m_ledBlue = 0xFF;
+   bool m_isColorDirty = true;
+   bool m_hasRgbLed = false;
++  SDL_SensorType m_gyroSensor = SDL_SENSOR_INVALID;
++  bool m_gyroSensorEnabled = false;
++  Uint64 m_gyroTrickPulseUntil = 0;
++  Uint64 m_gyroTrickCooldownUntil = 0;
+ };
+ 
+ GameController* get_controller_for_player(uint32_t player) noexcept;
+@@ -64,6 +69,10 @@ uint32_t controller_count() noexcept;
  void initialize() noexcept;
  void persist_controller_for_player(uint32_t player, const GameController* controller) noexcept;
  extern absl::flat_hash_map<Uint32, GameController> g_GameControllers;
@@ -688,10 +800,19 @@ index 0000000..952b8e3
 +}
 +}
 diff --git a/runtime/include/runtime_config.h b/runtime/include/runtime_config.h
-index c7a93c4..f7c90ed 100644
+index c7a93c4..c175b28 100644
 --- a/runtime/include/runtime_config.h
 +++ b/runtime/include/runtime_config.h
-@@ -159,7 +159,12 @@ inline bool IsSupportedFrameInterpolationFps(uint32_t value) {
+@@ -68,6 +68,8 @@ struct RuntimeUserConfig {
+     // comma-separated SDL-style physical button names ("south", or
+     // "dpad_up,left_shoulder") as values; pressing either bound button counts.
+     std::array<std::optional<std::string>, 12> controllerButtons;
++    std::optional<bool> gyroTricks;
++    std::optional<float> gyroTrickThreshold;
+ };
+ 
+ namespace RuntimeConfigFile {
+@@ -159,7 +161,12 @@ inline bool IsSupportedFrameInterpolationFps(uint32_t value) {
  }
  
  inline std::optional<std::filesystem::path> ExecutableDirectory() {
@@ -705,7 +826,7 @@ index c7a93c4..f7c90ed 100644
      std::wstring buffer(MAX_PATH, L'\0');
      for (;;) {
          const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
-@@ -219,6 +224,13 @@ inline const std::optional<std::filesystem::path>& PortableRootDirectory() {
+@@ -219,6 +226,13 @@ inline const std::optional<std::filesystem::path>& PortableRootDirectory() {
  }
  
  inline std::filesystem::path ApplicationDataDirectory() {
@@ -719,7 +840,54 @@ index c7a93c4..f7c90ed 100644
      if (const auto& portableRoot = PortableRootDirectory()) {
          return *portableRoot / kPortableUserDataDirectoryName;
      }
-@@ -909,3 +921,4 @@ inline void LogLoadedConfig() {
+@@ -373,6 +387,11 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
+         config.controllerButtons[index] =
+             FindConfigValue<std::string>(document, "controller", buttonKeys[index]);
+     }
++    config.gyroTricks = FindConfigValue<bool>(document, "controller", "gyro_tricks");
++    if (auto value = FindConfigFloat(document, "controller", "gyro_trick_threshold");
++        value && *value >= 2.0f && *value <= 20.0f) {
++        config.gyroTrickThreshold = *value;
++    }
+ 
+     config.widescreen = FindConfigValue<bool>(document, "video", "widescreen");
+     config.windowPosX = FindConfigInt(document, "video", "window_x");
+@@ -483,6 +502,14 @@ inline const std::optional<std::string>& ControllerButton(size_t index) {
+     return index < Get().controllerButtons.size() ? Get().controllerButtons[index] : empty;
+ }
+ 
++inline bool GyroTricksEnabled(bool fallback = true) {
++    return Get().gyroTricks.value_or(fallback);
++}
++
++inline float GyroTrickThreshold(float fallback = 6.0f) {
++    return std::clamp(Get().gyroTrickThreshold.value_or(fallback), 2.0f, 20.0f);
++}
++
+ // Update one TOML value without discarding comments, unrelated settings, or
+ // user-specific paths. This is used by the in-game F10 settings bar.
+ inline bool WriteSetting(std::string_view section, std::string_view key, std::string_view value) {
+@@ -638,6 +665,19 @@ inline bool SetControllerButton(size_t index, std::string value) {
+     return WriteSetting("controller", kControllerButtonKeys[index], FormatString(value));
+ }
+ 
++inline bool SetGyroTricksEnabled(bool value) {
++    Mutable().gyroTricks = value;
++    return WriteSetting("controller", "gyro_tricks", value ? "true" : "false");
++}
++
++inline bool SetGyroTrickThreshold(float value) {
++    value = std::clamp(value, 2.0f, 20.0f);
++    Mutable().gyroTrickThreshold = value;
++    std::ostringstream formatted;
++    formatted << value;
++    return WriteSetting("controller", "gyro_trick_threshold", formatted.str());
++}
++
+ inline bool SetAudioVolume(float value) {
+     value = std::clamp(value, 0.0f, 1.0f);
+     Mutable().audioVolume = value;
+@@ -909,3 +949,4 @@ inline void LogLoadedConfig() {
  }
  
  } // namespace RuntimeConfigFile
@@ -1479,6 +1647,51 @@ index f10a290..6bc7821 100644
  }
  extern "C" bool g_dynamicAspectRatioEnabled = false;
 +
+diff --git a/runtime/src/settings_overlay.cpp b/runtime/src/settings_overlay.cpp
+index a48415d..44fb301 100644
+--- a/runtime/src/settings_overlay.cpp
++++ b/runtime/src/settings_overlay.cpp
+@@ -98,6 +98,8 @@ int g_displayMode = [] {
+ bool g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
+ bool g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
+ bool g_showFps = RuntimeConfigFile::ShowFps(true);
++bool g_gyroTricks = RuntimeConfigFile::GyroTricksEnabled(true);
++float g_gyroTrickThreshold = RuntimeConfigFile::GyroTrickThreshold(6.0f);
+ uint32_t g_disabledPostProcessingPaths = RuntimeConfigFile::DisabledPostProcessingPaths(0);
+ std::array<int32_t, PAD_MAX_CONTROLLERS> g_configuredControllerIndices = [] {
+     std::array<int32_t, PAD_MAX_CONTROLLERS> indices{};
+@@ -360,6 +362,23 @@ void DrawControllerSettings() {
+     PADButtonMapping* altMappings =
+         PADGetAltButtonMappings(static_cast<uint32_t>(g_controllerPort), &altMappingCount);
+ 
++    ImGui::SeparatorText("Motion controls");
++    const bool hasGyro = PADHasGyroForTricks(selectedGamePort) != FALSE;
++    ImGui::BeginDisabled(!hasGyro);
++    if (ImGui::Checkbox("Shake controller for wheelies / tricks", &g_gyroTricks)) {
++        PADConfigureGyroTricks(g_gyroTricks ? TRUE : FALSE, g_gyroTrickThreshold);
++        RuntimeConfigFile::SetGyroTricksEnabled(g_gyroTricks);
++    }
++    ImGui::SetNextItemWidth(220.0f);
++    if (ImGui::SliderFloat("Shake sensitivity", &g_gyroTrickThreshold, 2.0f, 20.0f, "%.1f rad/s")) {
++        PADConfigureGyroTricks(g_gyroTricks ? TRUE : FALSE, g_gyroTrickThreshold);
++        RuntimeConfigFile::SetGyroTrickThreshold(g_gyroTrickThreshold);
++    }
++    ImGui::EndDisabled();
++    if (!hasGyro) {
++        ImGui::TextDisabled("This controller does not expose a gyro through SDL");
++    }
++
+     const auto writeBinding = [](size_t index, uint32_t primaryNative, uint32_t altNative) {
+         std::string value = NativeButtonForValue(primaryNative).configName;
+         if (altNative != PAD_NATIVE_BUTTON_INVALID) {
+@@ -848,6 +867,7 @@ void PersistDisplayModeIfChanged() {
+ void InitializeRuntimeSettings() noexcept {
+     controller_mapping_wizard::LoadPersistedMappings();
+     ApplyConfiguredMappings();
++    PADConfigureGyroTricks(g_gyroTricks ? TRUE : FALSE, g_gyroTrickThreshold);
+     AudioBackend::Instance().SetMasterVolume(static_cast<float>(g_audioVolumePercent) / 100.0f);
+     AudioBackend::Instance().SetMuted(g_audioMuted);
+     MusicAttenuation::SetMusicVolume(static_cast<float>(g_musicVolumePercent) / 100.0f);
 diff --git a/runtime/third_party/libco/android.c b/runtime/third_party/libco/android.c
 new file mode 100644
 index 0000000..fa89893
