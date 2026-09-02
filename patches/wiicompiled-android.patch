@@ -1241,6 +1241,92 @@ index dacbbe3..be47d88 100644
          kind = DeviceKind::NcdManage;
      } else if (std::strcmp(path, "/dev/net/ip/top") == 0) {
          kind = DeviceKind::IpTop;
+diff --git a/runtime/src/hle/net/network_ssl.cpp b/runtime/src/hle/net/network_ssl.cpp
+index d0bb9ac..c22eec9 100644
+--- a/runtime/src/hle/net/network_ssl.cpp
++++ b/runtime/src/hle/net/network_ssl.cpp
+@@ -530,16 +530,64 @@ static void ClearSslSession(SslSession& ssl) {
+     ssl = {};
+ }
+ 
+-static int32_t SslHandshakeImpl(SslSession&) {
+-    return SSL_ERR_FAILED;
++static int32_t SslHandshakeImpl(SslSession& ssl) {
++    if (!ssl.plaintextWfc || ssl.native == kInvalidSocket) {
++        return SSL_ERR_FAILED;
++    }
++    ssl.handshaked = true;
++    return SSL_OK;
+ }
+ 
+-static int32_t SslWrite(SslSession&, const uint8_t*, uint32_t) {
+-    return SSL_ERR_FAILED;
++static int32_t SslWrite(SslSession& ssl, const uint8_t* data, uint32_t size) {
++    if (!data || size == 0) {
++        return SSL_ERR_ZERO;
++    }
++    const int32_t handshakeRet = SslHandshake(ssl);
++    if (handshakeRet != SSL_OK) {
++        return handshakeRet;
++    }
++
++    uint32_t sent = 0;
++    while (sent < size) {
++        const size_t remaining = static_cast<size_t>(size - sent);
++        const ssize_t result = send(ssl.native, data + sent, remaining, MSG_NOSIGNAL);
++        if (result > 0) {
++            sent += static_cast<uint32_t>(result);
++            continue;
++        }
++        if (result < 0 && errno == EINTR) {
++            continue;
++        }
++        if (result < 0 && IsWouldBlockError(errno) && sent == 0) {
++            return SSL_ERR_WAGAIN;
++        }
++        return SSL_ERR_SYSCALL;
++    }
++    return static_cast<int32_t>(sent);
+ }
+ 
+-static int32_t SslRead(SslSession&, uint8_t*, uint32_t) {
+-    return SSL_ERR_FAILED;
++static int32_t SslRead(SslSession& ssl, uint8_t* out, uint32_t size) {
++    if (!out || size == 0) {
++        return SSL_ERR_ZERO;
++    }
++    const int32_t handshakeRet = SslHandshake(ssl);
++    if (handshakeRet != SSL_OK) {
++        return handshakeRet;
++    }
++
++    for (;;) {
++        const ssize_t result = recv(ssl.native, out, size, 0);
++        if (result > 0) {
++            return static_cast<int32_t>(result);
++        }
++        if (result == 0) {
++            return SSL_ERR_ZERO;
++        }
++        if (errno == EINTR) {
++            continue;
++        }
++        return IsWouldBlockError(errno) ? SSL_ERR_RAGAIN : SSL_ERR_SYSCALL;
++    }
+ }
+ #endif
+ 
+@@ -628,6 +676,10 @@ int32_t HandleSslIoctlv(uint32_t cmd, const std::vector<IoVector>& in, const std
+         const int timeoutMs = 15000;
+         setsockopt(socket->native, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
+         setsockopt(socket->native, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
++#else
++        const timeval timeout{15, 0};
++        setsockopt(socket->native, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
++        setsockopt(socket->native, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+ #endif
+         WriteSslReturn(in, SSL_OK);
+         return 0;
 diff --git a/runtime/src/hle/storage/nand_api.cpp b/runtime/src/hle/storage/nand_api.cpp
 index 723569c..7451cbb 100644
 --- a/runtime/src/hle/storage/nand_api.cpp
