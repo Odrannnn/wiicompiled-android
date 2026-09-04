@@ -23,6 +23,7 @@ import java.io.OutputStream;
 import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
@@ -59,11 +60,17 @@ public final class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
-        if (android.os.Build.VERSION.SDK_INT >= 33 &&
-            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
-                android.content.pm.PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 100);
-        }
+        List<String> requestedPermissions = new ArrayList<>();
+        if (android.os.Build.VERSION.SDK_INT >= 33 && checkSelfPermission(
+                android.Manifest.permission.POST_NOTIFICATIONS) !=
+                android.content.pm.PackageManager.PERMISSION_GRANTED)
+            requestedPermissions.add(android.Manifest.permission.POST_NOTIFICATIONS);
+        if (android.os.Build.VERSION.SDK_INT >= 31 && checkSelfPermission(
+                android.Manifest.permission.BLUETOOTH_CONNECT) !=
+                android.content.pm.PackageManager.PERMISSION_GRANTED)
+            requestedPermissions.add(android.Manifest.permission.BLUETOOTH_CONNECT);
+        if (!requestedPermissions.isEmpty())
+            requestPermissions(requestedPermissions.toArray(new String[0]), 100);
         boolean wide = getResources().getConfiguration().screenWidthDp >= 840;
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(wide ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
@@ -300,6 +307,7 @@ public final class MainActivity extends Activity {
             runtimeStatus.setText(RuntimePackManager.status(this));
     }
 
+    @android.annotation.SuppressLint("UnspecifiedRegisterReceiverFlag")
     @Override protected void onStart() {
         super.onStart(); stopped = false;
         IntentFilter filter = new IntentFilter(BuilderService.ACTION_UPDATE);

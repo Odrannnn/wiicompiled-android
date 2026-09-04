@@ -712,6 +712,7 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
     }
 
     @Override
+    @android.annotation.SuppressLint("GestureBackNavigation")
     public void onBackPressed() {
         // Check if we want to block the back button in case of mouse right click.
         //
