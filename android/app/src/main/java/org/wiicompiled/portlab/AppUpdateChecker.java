@@ -46,7 +46,7 @@ final class AppUpdateChecker {
                         throw new IOException("GitHub response is too large");
                     output.write(buffer, 0, read);
                 }
-                json = output.toString(StandardCharsets.UTF_8);
+                json = new String(output.toByteArray(), StandardCharsets.UTF_8);
             }
             try { return parse(json); }
             catch (org.json.JSONException error) {
