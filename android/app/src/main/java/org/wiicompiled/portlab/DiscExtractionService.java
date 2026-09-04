@@ -58,8 +58,8 @@ public final class DiscExtractionService extends Service {
             return START_NOT_STICKY;
         }
         if (!ACTION_START.equals(action) || running || intent.getData() == null) return START_NOT_STICKY;
-        if (BuilderService.isRunning()) {
-            publish("Wait for the private runtime build to finish before extracting a disc.", 0, false);
+        if (BuilderService.isRunning() || RetroRewindInstallService.isRunning()) {
+            publish("Wait for the private runtime build or Retro Rewind installation to finish before extracting a disc.", 0, false);
             stopSelf(startId);
             return START_NOT_STICKY;
         }

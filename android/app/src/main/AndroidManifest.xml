@@ -23,6 +23,7 @@
             android:configChanges="layoutDirection|locale|grammaticalGender|fontScale|fontWeightAdjustment|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation|touchscreen|density|colorMode" />
         <service android:name=".BuilderService" android:exported="false" android:foregroundServiceType="dataSync" />
         <service android:name=".DiscExtractionService" android:exported="false" android:foregroundServiceType="dataSync" />
+        <service android:name=".RetroRewindInstallService" android:exported="false" android:foregroundServiceType="dataSync" />
     </application>
 </manifest>
 

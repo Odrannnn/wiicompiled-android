@@ -5,6 +5,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InterruptedIOException;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URLEncoder;
@@ -27,7 +28,7 @@ final class GameBananaClient {
     record ModFile(String name, long size, String url) { }
     record Details(int id, String name, String version, String author, String description,
                    long downloads, List<ModFile> files) { }
-    interface Progress { void update(long received, long total); }
+    interface Progress { boolean update(long received, long total); }
 
     static List<CatalogMod> search(String term, int page) throws IOException {
         String query = term == null || term.isBlank() ? "Mod" : term.trim();
@@ -83,7 +84,9 @@ final class GameBananaClient {
             byte[] buffer = new byte[64 * 1024]; long received = 0;
             for (int read; (read = input.read(buffer)) != -1;) {
                 received += read; if (received > maximum) throw new IOException("Download exceeds its safety limit");
-                output.write(buffer, 0, read); if (progress != null) progress.update(received, declared);
+                output.write(buffer, 0, read);
+                if (progress != null && !progress.update(received, declared))
+                    throw new InterruptedIOException("Download cancelled");
             }
         } catch (IOException error) { destination.delete(); throw error; }
         finally { connection.disconnect(); }

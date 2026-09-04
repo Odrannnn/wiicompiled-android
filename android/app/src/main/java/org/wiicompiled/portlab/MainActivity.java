@@ -37,12 +37,13 @@ public final class MainActivity extends Activity {
     private TextView diagnostics, discStatus, gpuDriverStatus, modStatus, retroRewindStatus, runtimeStatus, builderStatus;
     private LinearLayout modsContainer;
     private Button testButton, builderBuildButton, builderCancelButton, discExtractButton, discCancelButton;
+    private Button retroCheckButton, retroCancelButton;
     private Button[] navigationButtons;
     private View[] pages;
     private int selectedPage;
     private String report = "No native diagnostics have run.";
     private boolean stopped;
-    private boolean builderReceiverRegistered, discReceiverRegistered;
+    private boolean builderReceiverRegistered, discReceiverRegistered, retroReceiverRegistered;
     private final BroadcastReceiver builderReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
             updateBuilderUi(intent.getStringExtra(BuilderService.EXTRA_STATUS),
@@ -55,6 +56,13 @@ public final class MainActivity extends Activity {
             updateDiscUi(intent.getStringExtra(DiscExtractionService.EXTRA_STATUS),
                 intent.getIntExtra(DiscExtractionService.EXTRA_PERCENT, 0),
                 intent.getBooleanExtra(DiscExtractionService.EXTRA_RUNNING, false));
+        }
+    };
+    private final BroadcastReceiver retroReceiver = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) {
+            updateRetroUi(intent.getStringExtra(RetroRewindInstallService.EXTRA_STATUS),
+                intent.getIntExtra(RetroRewindInstallService.EXTRA_PERCENT, 0),
+                intent.getBooleanExtra(RetroRewindInstallService.EXTRA_RUNNING, false));
         }
     };
 
@@ -207,8 +215,12 @@ public final class MainActivity extends Activity {
         button(actions, "Browse online mods", v -> showCatalogueSearch());
         LinearLayout retro = card("Retro Rewind",
             "Install or update the official distribution as a managed, hash-gated ARM64 profile.");
-        retroRewindStatus = label(retro, "Status has not been checked.", 15, Color.rgb(209, 250, 229));
-        button(retro, "Check installation", v -> checkRetroRewind());
+        retroRewindStatus = label(retro, RetroRewindInstallService.currentStatus(this),
+            15, Color.rgb(209, 250, 229));
+        retroCheckButton = button(retro, "Check installation", v -> checkRetroRewind());
+        retroCancelButton = button(retro, "Cancel current installation", v -> startService(
+            new Intent(this, RetroRewindInstallService.class).setAction(RetroRewindInstallService.ACTION_CANCEL)));
+        retroCancelButton.setEnabled(RetroRewindInstallService.isRunning());
         addPair(page, actions, retro, wide);
         LinearLayout profiles = card("Installed profiles", "Enable, prioritize, configure, or remove local profiles.");
         modsContainer = new LinearLayout(this); modsContainer.setOrientation(LinearLayout.VERTICAL);
@@ -367,9 +379,11 @@ public final class MainActivity extends Activity {
         builderStatus.setText(text);
         if (!running && percent >= 100 && runtimeStatus != null) runtimeStatus.setText(RuntimePackManager.status(this));
         if (builderBuildButton != null) builderBuildButton.setEnabled(
-            AndroidBuilderManager.available(this) && !running && !DiscExtractionService.isRunning());
+            AndroidBuilderManager.available(this) && !running && !DiscExtractionService.isRunning()
+                && !RetroRewindInstallService.isRunning());
         if (builderCancelButton != null) builderCancelButton.setEnabled(running);
-        if (discExtractButton != null) discExtractButton.setEnabled(!running && !DiscExtractionService.isRunning());
+        if (discExtractButton != null) discExtractButton.setEnabled(!running && !DiscExtractionService.isRunning()
+            && !RetroRewindInstallService.isRunning());
     }
 
     private void updateDiscUi(String message, int percent, boolean running) {
@@ -377,12 +391,28 @@ public final class MainActivity extends Activity {
         String text = message == null ? DiscExtractionService.currentStatus(this) : message;
         if (running && percent > 1) text += "\n" + percent + "% complete";
         discStatus.setText(text);
-        if (discExtractButton != null) discExtractButton.setEnabled(!running && !BuilderService.isRunning());
+        if (discExtractButton != null) discExtractButton.setEnabled(!running && !BuilderService.isRunning()
+            && !RetroRewindInstallService.isRunning());
         if (discCancelButton != null) discCancelButton.setEnabled(running);
         if (builderBuildButton != null) builderBuildButton.setEnabled(
-            AndroidBuilderManager.available(this) && !running && !BuilderService.isRunning());
+            AndroidBuilderManager.available(this) && !running && !BuilderService.isRunning()
+                && !RetroRewindInstallService.isRunning());
         if (!running && percent >= 100 && runtimeStatus != null)
             runtimeStatus.setText(RuntimePackManager.status(this));
+    }
+
+    private void updateRetroUi(String message, int percent, boolean running) {
+        if (retroRewindStatus == null) return;
+        String text = message == null ? RetroRewindInstallService.currentStatus(this) : message;
+        if (running && percent > 1) text += "\n" + percent + "% complete";
+        retroRewindStatus.setText(text);
+        if (retroCheckButton != null) retroCheckButton.setEnabled(!running);
+        if (retroCancelButton != null) retroCancelButton.setEnabled(running);
+        if (builderBuildButton != null) builderBuildButton.setEnabled(AndroidBuilderManager.available(this)
+            && !running && !BuilderService.isRunning() && !DiscExtractionService.isRunning());
+        if (discExtractButton != null) discExtractButton.setEnabled(
+            !running && !BuilderService.isRunning() && !DiscExtractionService.isRunning());
+        if (!running && percent >= 100) refreshModsUi(text);
     }
 
     @android.annotation.SuppressLint("UnspecifiedRegisterReceiverFlag")
@@ -396,15 +426,22 @@ public final class MainActivity extends Activity {
         if (android.os.Build.VERSION.SDK_INT >= 33) registerReceiver(discReceiver, discFilter, RECEIVER_NOT_EXPORTED);
         else registerReceiver(discReceiver, discFilter);
         discReceiverRegistered = true;
+        IntentFilter retroFilter = new IntentFilter(RetroRewindInstallService.ACTION_UPDATE);
+        if (android.os.Build.VERSION.SDK_INT >= 33) registerReceiver(retroReceiver, retroFilter, RECEIVER_NOT_EXPORTED);
+        else registerReceiver(retroReceiver, retroFilter);
+        retroReceiverRegistered = true;
         updateBuilderUi(BuilderService.isRunning() ? BuilderService.currentStatus() : AndroidBuilderManager.status(this),
             BuilderService.currentPercent(), BuilderService.isRunning());
         updateDiscUi(DiscExtractionService.currentStatus(this), DiscExtractionService.currentPercent(),
             DiscExtractionService.isRunning());
+        updateRetroUi(RetroRewindInstallService.currentStatus(this), RetroRewindInstallService.currentPercent(),
+            RetroRewindInstallService.isRunning());
     }
 
     @Override protected void onStop() {
         if (builderReceiverRegistered) { unregisterReceiver(builderReceiver); builderReceiverRegistered = false; }
         if (discReceiverRegistered) { unregisterReceiver(discReceiver); discReceiverRegistered = false; }
+        if (retroReceiverRegistered) { unregisterReceiver(retroReceiver); retroReceiverRegistered = false; }
         super.onStop();
     }
 
@@ -733,11 +770,12 @@ public final class MainActivity extends Activity {
             try {
                 final long[] lastUpdate = {0};
                 GameBananaClient.download(remote, temporary, (received, total) -> {
-                    long now = android.os.SystemClock.elapsedRealtime(); if (now - lastUpdate[0] < 250) return;
+                    long now = android.os.SystemClock.elapsedRealtime(); if (now - lastUpdate[0] < 250) return true;
                     lastUpdate[0] = now; int percent = total > 0 ? (int)Math.min(received * 100 / total, 100) : -1;
                     String progress = percent >= 0 ? "Downloading " + details.name() + ": " + percent + "%"
                         : "Downloading " + details.name() + ": " + (received / (1024 * 1024)) + " MiB";
                     runOnUiThread(() -> { if (!stopped) modStatus.setText(progress); });
+                    return true;
                 });
                 File external = getExternalFilesDir(null);
                 if (external == null) throw new java.io.IOException("External app storage unavailable");
@@ -791,32 +829,10 @@ public final class MainActivity extends Activity {
     }
 
     private void installRetroRewind() {
-        retroRewindStatus.setText("Preparing Retro Rewind…");
-        worker.execute(() -> {
-            try {
-                File external = getExternalFilesDir(null);
-                if (external == null) throw new java.io.IOException("External app storage unavailable");
-                final long[] lastUpdate = {0};
-                AndroidModManager.Mod installed = RetroRewindService.installOrUpdate(this,
-                    new File(external, "game/disc/files"), (stage, done, total) -> {
-                        long now = android.os.SystemClock.elapsedRealtime(); if (now - lastUpdate[0] < 250) return;
-                        lastUpdate[0] = now; String text = stage;
-                        if (done > 0) text += total > 0 ? ": " + Math.min(done * 100 / total, 100) + "%"
-                            : ": " + (done / (1024 * 1024)) + " MiB";
-                        final String progress = text;
-                        runOnUiThread(() -> { if (!stopped) retroRewindStatus.setText(progress); });
-                    });
-                String result = "Installed Retro Rewind " + installed.distributionVersion
-                    + " as a managed profile. Restart the game to apply it.";
-                runOnUiThread(() -> { if (!stopped) {
-                    retroRewindStatus.setText(result); refreshModsUi(result);
-                }});
-            } catch (Exception error) {
-                android.util.Log.e("WiiCompiled", "Retro Rewind installation failed", error);
-                String result = "Retro Rewind installation failed: " + error.getMessage();
-                runOnUiThread(() -> { if (!stopped) retroRewindStatus.setText(result); });
-            }
-        });
+        Intent service = new Intent(this, RetroRewindInstallService.class)
+            .setAction(RetroRewindInstallService.ACTION_START);
+        startForegroundService(service);
+        updateRetroUi("Preparing Retro Rewind…", 1, true);
     }
 
     @Override protected void onSaveInstanceState(Bundle state) {

@@ -41,8 +41,8 @@ public final class BuilderService extends Service {
             return START_NOT_STICKY;
         }
         if (!ACTION_START.equals(action) || running) return START_NOT_STICKY;
-        if (DiscExtractionService.isRunning()) {
-            publish("Wait for disc extraction to finish before building.", 0, false);
+        if (DiscExtractionService.isRunning() || RetroRewindInstallService.isRunning()) {
+            publish("Wait for disc extraction or Retro Rewind installation to finish before building.", 0, false);
             stopSelf(startId);
             return START_NOT_STICKY;
         }

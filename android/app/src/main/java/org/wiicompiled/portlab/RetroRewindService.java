@@ -7,6 +7,7 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InterruptedIOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -32,7 +33,7 @@ final class RetroRewindService {
     private static final long MIN_STAGING_SPACE = 12L * GIB;
     private static final int MAX_ENTRIES = 20_000;
 
-    interface Progress { void update(String stage, long done, long total); }
+    interface Progress { boolean update(String stage, long done, long total); }
     record Status(String installedVersion, String latestVersion) {
         boolean installed() { return installedVersion != null; }
         boolean current() { return installed() && Version.parse(installedVersion).compareTo(Version.parse(latestVersion)) >= 0; }
@@ -59,8 +60,9 @@ final class RetroRewindService {
             File baseZip = new File(downloads, "base.zip");
             report(progress, "Downloading Retro Rewind base", 0, -1);
             GameBananaClient.downloadUrl(installUrl, baseZip, MAX_DOWNLOAD,
-                (done, total) -> report(progress, "Downloading Retro Rewind base", done, total));
-            report(progress, "Extracting Retro Rewind base", 0, -1); extract(baseZip, extracted);
+                (done, total) -> active(progress, "Downloading Retro Rewind base", done, total));
+            report(progress, "Extracting Retro Rewind base", 0, -1);
+            extract(baseZip, extracted, progress, "Extracting Retro Rewind base");
 
             Version baseVersion = readInstalledVersion(extracted); List<Update> needed = new ArrayList<>();
             for (Update update : updates) if (update.version().compareTo(baseVersion) > 0) needed.add(update);
@@ -73,9 +75,10 @@ final class RetroRewindService {
                 Update update = needed.get(index); File zip = new File(downloads, "update-" + index + ".zip");
                 String label = "Downloading Retro Rewind update " + (index + 1) + "/" + needed.size();
                 GameBananaClient.downloadUrl(update.url(), zip, MAX_DOWNLOAD,
-                    (done, total) -> report(progress, label, done, total));
+                    (done, total) -> active(progress, label, done, total));
                 report(progress, "Applying Retro Rewind update " + (index + 1) + "/" + needed.size(), 0, -1);
-                extract(zip, extracted); zip.delete();
+                extract(zip, extracted, progress, "Applying Retro Rewind update " + (index + 1) + "/" + needed.size());
+                zip.delete();
             }
             File rrFolder = caseInsensitiveChild(extracted, "RetroRewind6");
             if (!rrFolder.isDirectory() || !caseInsensitiveChild(extracted, "riivolution").isDirectory())
@@ -83,7 +86,8 @@ final class RetroRewindService {
             Files.write(new File(rrFolder, "version.txt").toPath(), latest.text().getBytes(StandardCharsets.UTF_8));
 
             File combined = new File(work, "Retro-Rewind-" + latest.text() + ".zip");
-            report(progress, "Preparing Android mod profile", 0, -1); createZip(extracted, combined);
+            report(progress, "Preparing Android mod profile", 0, -1);
+            createZip(extracted, combined, progress); report(progress, "Importing Android mod profile", 0, -1);
             AndroidModManager.Mod previous = installed(context);
             AndroidModManager.ImportResult imported = AndroidModManager.importRetroRewindDistribution(
                 context, Uri.fromFile(combined), discFiles);
@@ -169,7 +173,7 @@ final class RetroRewindService {
         return String.format(Locale.US, "%.1f", bytes / (double)GIB);
     }
 
-    private static void extract(File zipFile, File destination) throws IOException {
+    private static void extract(File zipFile, File destination, Progress progress, String stage) throws IOException {
         String allowed = destination.getCanonicalPath() + File.separator; int entries = 0; long total = 0;
         try (ZipInputStream zip = new ZipInputStream(new FileInputStream(zipFile))) {
             for (ZipEntry entry; (entry = zip.getNextEntry()) != null; zip.closeEntry()) {
@@ -185,20 +189,30 @@ final class RetroRewindService {
                         current += read; total += read;
                         if (current > MAX_ENTRY || total > MAX_EXPANDED) throw new IOException("Retro Rewind archive exceeds safety limits");
                         file.write(buffer, 0, read);
+                        if ((total & ((4L * 1024 * 1024) - 1)) < buffer.length)
+                            report(progress, stage, total, -1);
                     }
                 }
             }
         }
     }
-    private static void createZip(File root, File destination) throws IOException {
+    private static void createZip(File root, File destination, Progress progress) throws IOException {
         List<File> files = new ArrayList<>(); collect(root, files);
         files.sort(Comparator.comparing(file -> relative(root, file))); if (files.size() > MAX_ENTRIES)
             throw new IOException("Retro Rewind profile has too many files");
+        long totalBytes = 0; for (File file : files) totalBytes += file.length();
+        final long expected = totalBytes; long written = 0;
         try (ZipOutputStream zip = new ZipOutputStream(new FileOutputStream(destination))) {
             byte[] buffer = new byte[64 * 1024];
             for (File file : files) {
                 ZipEntry entry = new ZipEntry(relative(root, file).replace('\\', '/')); entry.setTime(0); zip.putNextEntry(entry);
-                try (InputStream input = new FileInputStream(file)) { for (int read; (read = input.read(buffer)) != -1;) zip.write(buffer, 0, read); }
+                try (InputStream input = new FileInputStream(file)) {
+                    for (int read; (read = input.read(buffer)) != -1;) {
+                        zip.write(buffer, 0, read); written += read;
+                        if ((written & ((4L * 1024 * 1024) - 1)) < buffer.length)
+                            report(progress, "Preparing Android mod profile", written, expected);
+                    }
+                }
                 zip.closeEntry();
             }
         }
@@ -223,8 +237,11 @@ final class RetroRewindService {
     private static void delete(File file) {
         File[] children = file.listFiles(); if (children != null) for (File child : children) delete(child); file.delete();
     }
-    private static void report(Progress progress, String stage, long done, long total) {
-        if (progress != null) progress.update(stage, done, total);
+    private static boolean active(Progress progress, String stage, long done, long total) {
+        return progress == null || progress.update(stage, done, total);
+    }
+    private static void report(Progress progress, String stage, long done, long total) throws InterruptedIOException {
+        if (!active(progress, stage, done, total)) throw new InterruptedIOException("Retro Rewind installation cancelled");
     }
 
     private record Version(int major, int minor, int patch, String text) implements Comparable<Version> {
