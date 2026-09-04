@@ -4,6 +4,7 @@
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- No broad storage access. Local files still require explicit document selection. -->
     <application android:label="WiiCompiled Port Lab" android:allowBackup="false" android:icon="@drawable/ic_portlab" android:dataExtractionRules="@xml/data_extraction_rules"
         android:networkSecurityConfig="@xml/network_security_config"
@@ -18,6 +19,7 @@
             android:screenOrientation="sensorLandscape" android:hardwareAccelerated="true"
             android:configChanges="layoutDirection|locale|grammaticalGender|fontScale|fontWeightAdjustment|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation" />
         <service android:name=".BuilderService" android:exported="false" android:foregroundServiceType="dataSync" />
+        <service android:name=".DiscExtractionService" android:exported="false" android:foregroundServiceType="dataSync" />
     </application>
 </manifest>
 

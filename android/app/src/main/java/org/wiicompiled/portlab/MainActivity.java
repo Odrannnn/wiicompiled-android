@@ -5,11 +5,8 @@ import android.content.Intent;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.IntentFilter;
-import android.content.SharedPreferences;
-import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
-import android.provider.OpenableColumns;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 import android.view.View;
@@ -38,13 +35,13 @@ public final class MainActivity extends Activity {
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private TextView diagnostics, discStatus, gpuDriverStatus, modStatus, retroRewindStatus, runtimeStatus, builderStatus;
     private LinearLayout modsContainer;
-    private Button testButton;
+    private Button testButton, discExtractButton, discCancelButton;
     private Button[] navigationButtons;
     private View[] pages;
     private int selectedPage;
     private String report = "No native diagnostics have run.";
     private boolean stopped;
-    private boolean builderReceiverRegistered;
+    private boolean builderReceiverRegistered, discReceiverRegistered;
     private final BroadcastReceiver builderReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
             updateBuilderUi(intent.getStringExtra(BuilderService.EXTRA_STATUS),
@@ -52,9 +49,21 @@ public final class MainActivity extends Activity {
                 intent.getBooleanExtra(BuilderService.EXTRA_RUNNING, false));
         }
     };
+    private final BroadcastReceiver discReceiver = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) {
+            updateDiscUi(intent.getStringExtra(DiscExtractionService.EXTRA_STATUS),
+                intent.getIntExtra(DiscExtractionService.EXTRA_PERCENT, 0),
+                intent.getBooleanExtra(DiscExtractionService.EXTRA_RUNNING, false));
+        }
+    };
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
+                android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 100);
+        }
         boolean wide = getResources().getConfiguration().screenWidthDp >= 840;
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(wide ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
@@ -156,9 +165,9 @@ public final class MainActivity extends Activity {
         addCard(page, builder);
         LinearLayout disc = card("PAL disc reference",
             "Extract your own clean PAL RMCP01 image directly into app-private storage. Supports ISO, RVZ, WBFS, WIA, CISO, and GCZ.");
-        discStatus = label(disc, getPreferences(MODE_PRIVATE).getString("discStatus", DiscExtractor.installedStatus(this)),
+        discStatus = label(disc, DiscExtractionService.currentStatus(this),
             15, Color.rgb(209, 250, 229));
-        button(disc, "Select and extract disc image", v -> {
+        discExtractButton = button(disc, "Select and extract disc image", v -> {
             Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
             intent.addCategory(Intent.CATEGORY_OPENABLE); intent.setType("*/*");
             intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
@@ -166,6 +175,13 @@ public final class MainActivity extends Activity {
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
             startActivityForResult(intent, PICK_DISC);
         });
+        discCancelButton = button(disc, "Cancel current extraction", v -> {
+            Intent service = new Intent(this, DiscExtractionService.class)
+                .setAction(DiscExtractionService.ACTION_CANCEL);
+            startService(service);
+        });
+        updateDiscUi(DiscExtractionService.currentStatus(this),
+            DiscExtractionService.currentPercent(), DiscExtractionService.isRunning());
         addCard(page, disc); return pageScroll(page);
     }
 
@@ -267,18 +283,36 @@ public final class MainActivity extends Activity {
         if (!running && percent >= 100 && runtimeStatus != null) runtimeStatus.setText(RuntimePackManager.status(this));
     }
 
+    private void updateDiscUi(String message, int percent, boolean running) {
+        if (discStatus == null) return;
+        String text = message == null ? DiscExtractionService.currentStatus(this) : message;
+        if (running && percent > 1) text += "\n" + percent + "% complete";
+        discStatus.setText(text);
+        if (discExtractButton != null) discExtractButton.setEnabled(!running);
+        if (discCancelButton != null) discCancelButton.setEnabled(running);
+        if (!running && percent >= 100 && runtimeStatus != null)
+            runtimeStatus.setText(RuntimePackManager.status(this));
+    }
+
     @Override protected void onStart() {
         super.onStart(); stopped = false;
         IntentFilter filter = new IntentFilter(BuilderService.ACTION_UPDATE);
         if (android.os.Build.VERSION.SDK_INT >= 33) registerReceiver(builderReceiver, filter, RECEIVER_NOT_EXPORTED);
         else registerReceiver(builderReceiver, filter);
         builderReceiverRegistered = true;
+        IntentFilter discFilter = new IntentFilter(DiscExtractionService.ACTION_UPDATE);
+        if (android.os.Build.VERSION.SDK_INT >= 33) registerReceiver(discReceiver, discFilter, RECEIVER_NOT_EXPORTED);
+        else registerReceiver(discReceiver, discFilter);
+        discReceiverRegistered = true;
         updateBuilderUi(BuilderService.isRunning() ? BuilderService.currentStatus() : AndroidBuilderManager.status(this),
             BuilderService.currentPercent(), BuilderService.isRunning());
+        updateDiscUi(DiscExtractionService.currentStatus(this), DiscExtractionService.currentPercent(),
+            DiscExtractionService.isRunning());
     }
 
     @Override protected void onStop() {
         if (builderReceiverRegistered) { unregisterReceiver(builderReceiver); builderReceiverRegistered = false; }
+        if (discReceiverRegistered) { unregisterReceiver(discReceiver); discReceiverRegistered = false; }
         super.onStop();
     }
 
@@ -365,8 +399,12 @@ public final class MainActivity extends Activity {
                 }
             });
         } else if (request == PICK_DISC) {
-            discStatus.setText("Opening selected disc image…");
-            worker.execute(() -> extractDisc(uri, data.getFlags()));
+            Intent service = new Intent(this, DiscExtractionService.class)
+                .setAction(DiscExtractionService.ACTION_START).setData(uri)
+                .addFlags(data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION |
+                    Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION));
+            startForegroundService(service);
+            updateDiscUi("Opening selected disc image…", 1, true);
         } else if (request == PICK_GPU_DRIVER) {
             gpuDriverStatus.setText("Importing and validating driver…");
             worker.execute(() -> {
@@ -679,52 +717,6 @@ public final class MainActivity extends Activity {
                 runOnUiThread(() -> { if (!stopped) retroRewindStatus.setText(result); });
             }
         });
-    }
-
-    private void extractDisc(Uri uri, int grantedFlags) {
-        String name = "Selected document";
-        try {
-            try (Cursor cursor = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
-                if (cursor != null && cursor.moveToFirst()) name = cursor.getString(0);
-            }
-            boolean persistent = false;
-            try {
-                getContentResolver().takePersistableUriPermission(uri, grantedFlags & Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                persistent = true;
-            } catch (SecurityException e) {
-                // The activity's temporary grant remains valid for this extraction.
-            }
-            final String selectedName = name;
-            String summary = DiscExtractor.extract(this, uri, (stage, done, total) -> {
-                String progress = stage;
-                if (total > 0) progress += ": " + Math.min(done * 100 / total, 100) + "% · "
-                    + (done / 1048576) + " / " + (total / 1048576) + " MiB";
-                final String update = selectedName + "\n" + progress;
-                runOnUiThread(() -> { if (!stopped) discStatus.setText(update); });
-                return true;
-            });
-            SharedPreferences preferences = getPreferences(MODE_PRIVATE);
-            String old = preferences.getString("discUri", null);
-            SharedPreferences.Editor editor = preferences.edit();
-            if (persistent) editor.putString("discUri", uri.toString()); else editor.remove("discUri");
-            editor.apply();
-            if (old != null && !old.equals(uri.toString())) {
-                try { getContentResolver().releasePersistableUriPermission(Uri.parse(old), Intent.FLAG_GRANT_READ_URI_PERMISSION); }
-                catch (SecurityException ignored) { /* Provider may already have revoked the old grant. */ }
-            }
-            String text = selectedName + "\n" + summary;
-            if (!persistent) text += "\nThe provider did not grant persistent source access; the extracted files are unaffected.";
-            saveDiscStatus(text);
-            return;
-        } catch (Exception e) {
-            saveDiscStatus("Disc extraction failed: " + e.getMessage() + "\nThe previous installed extraction was left unchanged.");
-            return;
-        }
-    }
-
-    private void saveDiscStatus(String finished) {
-        getPreferences(MODE_PRIVATE).edit().putString("discStatus", finished).apply();
-        runOnUiThread(() -> { if (!stopped) discStatus.setText(finished); });
     }
 
     @Override protected void onSaveInstanceState(Bundle state) {
