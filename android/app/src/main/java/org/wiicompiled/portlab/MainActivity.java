@@ -32,7 +32,7 @@ import java.util.concurrent.Executors;
 /** Android setup, diagnostics, and local game launcher. */
 public final class MainActivity extends Activity {
     private static final int PICK_DISC = 1, EXPORT_REPORT = 2, PICK_GPU_DRIVER = 3, PICK_MOD = 4,
-        PICK_RUNTIME_PACK = 5;
+        PICK_RUNTIME_PACK = 5, EXPORT_BUILD_LOG = 6, EXPORT_GAME_LOG = 7;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private TextView diagnostics, discStatus, gpuDriverStatus, modStatus, retroRewindStatus, runtimeStatus, builderStatus;
     private LinearLayout modsContainer;
@@ -251,6 +251,10 @@ public final class MainActivity extends Activity {
             intent.putExtra(Intent.EXTRA_TITLE, "wiicompiled-android-diagnostics.txt");
             startActivityForResult(intent, EXPORT_REPORT);
         });
+        button(checks, "Export latest build log", v -> beginLogExport(
+            EXPORT_BUILD_LOG, "wiicompiled-build.log", latestBuildLog()));
+        button(checks, "Export latest game log", v -> beginLogExport(
+            EXPORT_GAME_LOG, "wiicompiled-game.log", latestGameLog()));
         LinearLayout about = card("About this build",
             "Version " + BuildConfig.VERSION_NAME + ". No copyrighted game image is bundled or downloaded by WiiCompiled.");
         button(about, "Check for app updates", v -> checkForAppUpdate());
@@ -290,6 +294,51 @@ public final class MainActivity extends Activity {
             } catch (Exception error) {
                 String message = "Update check failed: " + error.getMessage();
                 runOnUiThread(() -> { if (!stopped) diagnostics.setText(message); });
+            }
+        });
+    }
+
+    private void beginLogExport(int request, String name, File source) {
+        if (source == null || !source.isFile()) {
+            diagnostics.setText(request == EXPORT_BUILD_LOG
+                ? "No build log exists yet. Start an on-device build first."
+                : "No game log exists yet. Launch the game once first.");
+            return;
+        }
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("text/plain");
+        intent.putExtra(Intent.EXTRA_TITLE, name);
+        startActivityForResult(intent, request);
+    }
+
+    private File latestBuildLog() {
+        return new File(getFilesDir(), "android-builder/build.log");
+    }
+
+    private File latestGameLog() {
+        File root = new File(getFilesDir(), "WiiCompiled/Logs");
+        File[] runs = root.listFiles(File::isDirectory);
+        if (runs == null) return null;
+        File newest = null;
+        for (File run : runs) {
+            File candidate = new File(run, "console.log");
+            if (candidate.isFile() && (newest == null || candidate.lastModified() > newest.lastModified()))
+                newest = candidate;
+        }
+        return newest;
+    }
+
+    private void exportLog(File source, Uri destination, String label) {
+        worker.execute(() -> {
+            try (InputStream input = new java.io.FileInputStream(source);
+                 OutputStream output = getContentResolver().openOutputStream(destination, "wt")) {
+                if (output == null) throw new java.io.IOException("Document provider did not open the destination");
+                byte[] buffer = new byte[64 * 1024];
+                for (int read; (read = input.read(buffer)) != -1;) output.write(buffer, 0, read);
+                runOnUiThread(() -> { if (!stopped) diagnostics.setText(label + " exported successfully."); });
+            } catch (Exception error) {
+                runOnUiThread(() -> { if (!stopped) diagnostics.setText(label + " export failed: " + error.getMessage()); });
             }
         });
     }
@@ -441,6 +490,14 @@ public final class MainActivity extends Activity {
                     runOnUiThread(() -> { if (!stopped) diagnostics.setText(report + "\nExport failed: " + e.getMessage()); });
                 }
             });
+        } else if (request == EXPORT_BUILD_LOG) {
+            File source = latestBuildLog();
+            if (source.isFile()) exportLog(source, uri, "Build log");
+            else diagnostics.setText("The build log is no longer available.");
+        } else if (request == EXPORT_GAME_LOG) {
+            File source = latestGameLog();
+            if (source != null && source.isFile()) exportLog(source, uri, "Game log");
+            else diagnostics.setText("The game log is no longer available.");
         } else if (request == PICK_DISC) {
             Intent service = new Intent(this, DiscExtractionService.class)
                 .setAction(DiscExtractionService.ACTION_START).setData(uri)
