@@ -23,8 +23,8 @@ public final class DiscHeader {
         if (magic.equals("WBFS") || magic.equals("RVZ\1") || magic.equals("WIA\1")
                 || magic.equals("CISO") || (header[0] == 1 && header[1] == (byte)0xc0
                 && header[2] == 0x0b && header[3] == (byte)0xb1)) {
-            return "Container selected. WBFS/RVZ/WIA/CISO/GCZ extraction is not implemented on Android; "
-                + "disc region and revision are not verified.";
+            return "Supported disc container selected. Its region and revision are not verified by the "
+                + "outer header; Android extraction will validate them with NOD before activation.";
         }
         if (count < 32) return "Rejected: incomplete raw disc header.";
         if ((header[24] & 255) != 0x5d || (header[25] & 255) != 0x1c
@@ -34,8 +34,8 @@ public final class DiscHeader {
         if (!id.equals("RMCP01")) return "Rejected: expected PAL RMCP01, found " + id + ".";
         if (header[6] != 0 || header[7] != 0)
             return "Rejected: expected disc 0, revision 0.";
-        return "PAL RMCP01 revision 0 header found. Full disc integrity is NOT verified. "
-            + "Extraction, translation and installation are not implemented yet.";
+        return "PAL RMCP01 revision 0 header found. Full disc integrity is NOT verified by this bounded "
+            + "header check; Android extraction verifies partition hashes and the pinned game binaries.";
     }
     private DiscHeader() {}
 }
