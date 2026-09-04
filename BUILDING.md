@@ -181,7 +181,7 @@ The device performs these steps in app-private storage:
 9. removes the successful build's generated sources, objects, and link outputs while retaining the reusable compiler SDK, signed payload cache, and build log;
 10. enables the existing **Launch Mario Kart Wii** button.
 
-The source ROM remains wherever the user selected it. Extracted disc files, the reusable compiler SDK, the build log, and the active runtime pack remain under the application's private directories. Failed build workspaces remain for diagnosis and are replaced by the next attempt. Successful build workspaces, object files, and intermediate link outputs are deleted. Termux and a PC are not used by this device-side procedure. The PC toolchain described above is only needed by maintainers to produce the distributable Builder APK.
+The source ROM remains wherever the user selected it. Extracted disc files, the reusable compiler SDK, the build log, and the active runtime pack remain under the application's private directories. Failed build workspaces remain for diagnosis and are replaced by the next attempt. Successful build workspaces, object files, and intermediate link outputs are deleted. Termux and a PC are not used by this device-side procedure. The PC toolchain described above is only needed by maintainers to produce the distributable Builder APK. The Mods page installs Retro Rewind through a separate foreground service, so changing pages or recreating the activity does not stop its large download or staging pass; its notification and Mods card both expose cancellation.
 
 ## Legacy PC-built private runtime
 
@@ -266,7 +266,11 @@ Run `Build-AndroidTranslator.ps1`, `Build-AndroidCompiler.ps1`, and `Build-Andro
 
 ### Builder stops for storage or Android kills it
 
-Free at least 4 GiB in internal app storage and connect power. Start the build again from the Play page. The current workspace is disposable; the previously activated runtime and extracted disc remain intact. Do not clear application data, because that removes the extracted disc, profiles, and private runtime.
+Free at least 4 GiB in internal app storage and connect power. The builder now also preserves a 384 MiB working reserve during every compilation stage and automatically pauses at Android thermal status `SEVERE` or higher. Start the build again from the Play page. The current workspace is disposable; the previously activated runtime and extracted disc remain intact. Do not clear application data, because that removes the extracted disc, profiles, and private runtime.
+
+### Builder reports exit 133 or 134
+
+Exit 133 is `SIGTRAP`, normally an assertion or explicit trap in the translator/compiler. Exit 134 is `SIGABRT`, normally a fatal diagnostic followed by an abort. Changing pages cannot cause either code because the build belongs to its foreground service. Read the bounded **Last output** shown in the build card, then use **Tools > Export latest build log** for the complete command output. The same Tools page can export the latest native game log for crashes and Retro-WFC diagnosis.
 
 ### Retro-WFC reports Wii error 20100
 
