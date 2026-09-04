@@ -41,6 +41,11 @@ public final class BuilderService extends Service {
             return START_NOT_STICKY;
         }
         if (!ACTION_START.equals(action) || running) return START_NOT_STICKY;
+        if (DiscExtractionService.isRunning()) {
+            publish("Wait for disc extraction to finish before building.", 0, false);
+            stopSelf(startId);
+            return START_NOT_STICKY;
+        }
         running = true; publish("Starting private Android build…", 0, true);
         startForeground(41, notification(status, percent));
         worker.execute(() -> {
@@ -57,7 +62,11 @@ public final class BuilderService extends Service {
     private void publish(String message, int value, boolean active) {
         status = message; percent = Math.max(0, Math.min(100, value));
         NotificationManager manager = getSystemService(NotificationManager.class);
-        if (active) manager.notify(41, notification(message, percent));
+        if (active && (android.os.Build.VERSION.SDK_INT < 33 ||
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED)) {
+            manager.notify(41, notification(message, percent));
+        }
         Intent update = new Intent(ACTION_UPDATE).setPackage(getPackageName());
         update.putExtra(EXTRA_STATUS, message).putExtra(EXTRA_PERCENT, percent).putExtra(EXTRA_RUNNING, active);
         sendBroadcast(update);
@@ -66,11 +75,21 @@ public final class BuilderService extends Service {
     private Notification notification(String message, int value) {
         Intent open = new Intent(this, MainActivity.class);
         PendingIntent pending = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-        return new Notification.Builder(this, CHANNEL).setSmallIcon(android.R.drawable.stat_sys_download)
+        Intent cancelIntent = new Intent(this, BuilderService.class).setAction(ACTION_CANCEL);
+        PendingIntent cancel = PendingIntent.getService(this, 1, cancelIntent,
+            PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        Notification.Builder builder = new Notification.Builder(this, CHANNEL).setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentTitle("Building private WiiCompiled runtime").setContentText(message).setContentIntent(pending)
-            .setOngoing(running).setOnlyAlertOnce(true).setProgress(100, value, value <= 0).build();
+            .setStyle(new Notification.BigTextStyle().bigText(message))
+            .setOngoing(running).setOnlyAlertOnce(true).setProgress(100, value, value <= 0);
+        if (running) builder.addAction(new Notification.Action.Builder(null, "Cancel", cancel).build());
+        return builder.build();
     }
 
     @Override public IBinder onBind(Intent intent) { return null; }
-    @Override public void onDestroy() { worker.shutdownNow(); super.onDestroy(); }
+    @Override public void onDestroy() {
+        if (running) AndroidBuilderManager.cancel();
+        worker.shutdownNow();
+        super.onDestroy();
+    }
 }

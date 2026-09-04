@@ -35,7 +35,7 @@ public final class MainActivity extends Activity {
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private TextView diagnostics, discStatus, gpuDriverStatus, modStatus, retroRewindStatus, runtimeStatus, builderStatus;
     private LinearLayout modsContainer;
-    private Button testButton, discExtractButton, discCancelButton;
+    private Button testButton, builderBuildButton, builderCancelButton, discExtractButton, discCancelButton;
     private Button[] navigationButtons;
     private View[] pages;
     private int selectedPage;
@@ -149,7 +149,7 @@ public final class MainActivity extends Activity {
         LinearLayout builder = card("Build on this Android device",
             "The Builder edition translates your extracted disc and compiles a private ARM64 runtime here. When a supported Retro Rewind profile is enabled, the same build produces both required libraries and securely downloads its signed WFC payload. The first online build needs Internet access. No PC or Termux is required. Keep at least 4 GiB free and connect power.");
         builderStatus = label(builder, AndroidBuilderManager.status(this), 15, Color.rgb(209, 250, 229));
-        Button build = button(builder, "Build private runtime", v -> {
+        builderBuildButton = button(builder, "Build private runtime", v -> {
             if (!AndroidBuilderManager.available(this)) {
                 new android.app.AlertDialog.Builder(this).setTitle("Builder edition required")
                     .setMessage(AndroidBuilderManager.status(this)).setPositiveButton("Close", null).show(); return;
@@ -157,8 +157,8 @@ public final class MainActivity extends Activity {
             Intent service = new Intent(this, BuilderService.class).setAction(BuilderService.ACTION_START);
             startForegroundService(service); updateBuilderUi("Starting private Android build…", 0, true);
         });
-        build.setEnabled(AndroidBuilderManager.available(this));
-        button(builder, "Cancel current build", v -> {
+        builderBuildButton.setEnabled(AndroidBuilderManager.available(this));
+        builderCancelButton = button(builder, "Cancel current build", v -> {
             Intent service = new Intent(this, BuilderService.class).setAction(BuilderService.ACTION_CANCEL);
             startService(service);
         });
@@ -281,6 +281,10 @@ public final class MainActivity extends Activity {
         if (running && percent > 0) text += "\n" + percent + "% complete";
         builderStatus.setText(text);
         if (!running && percent >= 100 && runtimeStatus != null) runtimeStatus.setText(RuntimePackManager.status(this));
+        if (builderBuildButton != null) builderBuildButton.setEnabled(
+            AndroidBuilderManager.available(this) && !running && !DiscExtractionService.isRunning());
+        if (builderCancelButton != null) builderCancelButton.setEnabled(running);
+        if (discExtractButton != null) discExtractButton.setEnabled(!running && !DiscExtractionService.isRunning());
     }
 
     private void updateDiscUi(String message, int percent, boolean running) {
@@ -288,8 +292,10 @@ public final class MainActivity extends Activity {
         String text = message == null ? DiscExtractionService.currentStatus(this) : message;
         if (running && percent > 1) text += "\n" + percent + "% complete";
         discStatus.setText(text);
-        if (discExtractButton != null) discExtractButton.setEnabled(!running);
+        if (discExtractButton != null) discExtractButton.setEnabled(!running && !BuilderService.isRunning());
         if (discCancelButton != null) discCancelButton.setEnabled(running);
+        if (builderBuildButton != null) builderBuildButton.setEnabled(
+            AndroidBuilderManager.available(this) && !running && !BuilderService.isRunning());
         if (!running && percent >= 100 && runtimeStatus != null)
             runtimeStatus.setText(RuntimePackManager.status(this));
     }

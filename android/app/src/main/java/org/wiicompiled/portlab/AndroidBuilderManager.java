@@ -2,6 +2,7 @@ package org.wiicompiled.portlab;
 
 import android.content.Context;
 import android.os.StatFs;
+import android.os.PowerManager;
 import android.system.Os;
 import java.io.BufferedInputStream;
 import java.io.BufferedReader;
@@ -31,6 +32,7 @@ final class AndroidBuilderManager {
     private static final AtomicBoolean CANCELLED = new AtomicBoolean();
     private static volatile Process activeProcess;
     private static final long MIN_FREE_BYTES = 4L * 1024 * 1024 * 1024;
+    private static final long MIN_WORKING_FREE_BYTES = 384L * 1024 * 1024;
 
     static boolean available(Context context) {
         if (!BuildConfig.WITH_BUILDER) return false;
@@ -54,6 +56,8 @@ final class AndroidBuilderManager {
 
     static String build(Context context, Progress progress) throws IOException {
         if (!available(context)) throw new IOException("This APK does not contain the Android builder payload");
+        if (DiscExtractionService.isRunning())
+            throw new IOException("Wait for the current disc extraction to finish before building");
         CANCELLED.set(false);
         File external = context.getExternalFilesDir(null);
         if (external == null) throw new IOException("External app storage is unavailable");
@@ -74,7 +78,7 @@ final class AndroidBuilderManager {
             extractAsset(context, "runtime-sdk.zip", sdk);
             if (!marker.createNewFile()) throw new IOException("Cannot finalize the private builder SDK");
         }
-        checkCancelled();
+        awaitBuildConditions(context, progress, "Preparing private build workspace…", 5);
         File workspace = new File(root, "workspace"), objects = new File(root, "objects");
         deleteRecursively(workspace); deleteRecursively(objects);
         if (!workspace.mkdirs() || !objects.mkdirs()) throw new IOException("Cannot create the private build workspace");
@@ -83,6 +87,7 @@ final class AndroidBuilderManager {
         File stagedRetro = retroRoot == null ? null : stageRetroRewind(workspace, retroRoot);
         File retroWfcPayload = null;
         if (retroRoot != null) {
+            awaitBuildConditions(context, progress, "Preparing Retro-WFC payload…", 4);
             progress.update("Downloading and verifying the signed Retro-WFC payload…", 4);
             retroWfcPayload = RetroWfcPayloadManager.download(context);
             checkCancelled();
@@ -103,12 +108,14 @@ final class AndroidBuilderManager {
         File project = new File(workspace, "projects/mkwii/recomp.yml");
         int threads = Math.max(1, Math.min(4, Runtime.getRuntime().availableProcessors() / 2));
 
+        awaitBuildConditions(context, progress, "Translating PowerPC game code…", 6);
         progress.update("Translating PowerPC game code…", 6);
         run(workspace, log, nativeDir, list(translator, "translate-recursive", "0x800060A4", "--project", project,
             "--outdir", new File(workspace, "generated/functions"), "--output-metadata",
             new File(workspace, "generated/base_translation_metadata.json"), "--production-source-bundle",
             new File(workspace, "generated/base_translation_sources.bin"), "--no-function-files", "--prune-stale",
             "--threads", Integer.toString(threads)));
+        awaitBuildConditions(context, progress, "Writing the private base manifest…", 27);
         progress.update("Writing the private base manifest…", 27);
         run(workspace, log, nativeDir, list(translator, "emit-base-manifest", "--project", project, "--out",
             new File(workspace, "build/base"), "--functions-dir", new File(workspace, "generated/functions"),
@@ -116,6 +123,7 @@ final class AndroidBuilderManager {
         run(workspace, log, nativeDir, list(translator, "generate-data-init", "--project", project));
         File retroOutput = new File(workspace, "build/mods/retro_rewind_full_cpp");
         if (retroRoot != null) {
+            awaitBuildConditions(context, progress, "Translating the pinned Retro Rewind code patch…", 30);
             progress.update("Translating the pinned Retro Rewind code patch…", 30);
             run(workspace, log, nativeDir, list(translator, "translate-mod", "--project", project,
                 "--profile", "retro-rewind", "--base-manifest", new File(workspace, "build/base/mkwii_base_manifest.json"),
@@ -148,20 +156,23 @@ final class AndroidBuilderManager {
         File resource = new File(sdk, "toolchain/lib/clang/21");
         Map<String, File> objectFiles = new LinkedHashMap<>(); int index = 0;
         for (File source : sources.values()) {
-            checkCancelled();
+            int percent = 36 + (int)((index + 1L) * 51 / sources.size());
+            String compileStatus = "Compiling private ARM64 unit " + (index + 1) + " of " + sources.size() + "…";
+            awaitBuildConditions(context, progress, compileStatus, percent);
             File object = new File(objects, String.format("unit-%03d.o", index));
             List<Object> command = compilePrefix(clang, bin, sysroot, resource, workspace);
             command.add("-c"); command.add(source); command.add("-o"); command.add(object);
-            int percent = 36 + (int)((index + 1L) * 51 / sources.size());
-            progress.update("Compiling private ARM64 unit " + (index + 1) + " of " + sources.size() + "…", percent);
+            progress.update(compileStatus, percent);
             run(workspace, log, nativeDir, command); objectFiles.put(source.getAbsolutePath(), object); index++;
         }
 
+        awaitBuildConditions(context, progress, "Linking the private ARM64 base runtime…", 90);
         progress.update("Linking the private ARM64 base runtime…", 90);
         File result = new File(root, "output/libWiiCompiled.so"), retroResult = null;
         linkProduct(workspace, log, nativeDir, clang, bin, sysroot, resource, sdk,
             result, "libWiiCompiled.so", baseSources, objectFiles);
         if (retroRoot != null) {
+            awaitBuildConditions(context, progress, "Linking the private Retro Rewind runtime…", 94);
             progress.update("Linking the private Retro Rewind runtime…", 94);
             retroResult = new File(root, "output/libRetroRewind.so");
             linkProduct(workspace, log, nativeDir, clang, bin, sysroot, resource, sdk,
@@ -175,6 +186,34 @@ final class AndroidBuilderManager {
         deleteRecursively(new File(root, "output"));
         deleteRecursively(bin);
         progress.update(finished, 100); return finished;
+    }
+
+    private static void awaitBuildConditions(Context context, Progress progress,
+                                             String resumeMessage, int percent) throws IOException {
+        checkCancelled();
+        PowerManager power = context.getSystemService(PowerManager.class);
+        boolean paused = false;
+        while (power != null && power.getCurrentThermalStatus() >= PowerManager.THERMAL_STATUS_SEVERE) {
+            paused = true;
+            progress.update("Build paused while the device cools. It will resume automatically…", percent);
+            checkWorkingStorage(context);
+            try { Thread.sleep(1500); }
+            catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Build interrupted while waiting for the device to cool", interrupted);
+            }
+            checkCancelled();
+        }
+        checkWorkingStorage(context);
+        if (paused) progress.update(resumeMessage, percent);
+    }
+
+    private static void checkWorkingStorage(Context context) throws IOException {
+        long free = new StatFs(context.getFilesDir().getAbsolutePath()).getAvailableBytes();
+        if (free < MIN_WORKING_FREE_BYTES) {
+            throw new IOException("Build stopped before internal storage became critically low ("
+                + (free / (1024 * 1024)) + " MiB free). Free space and start it again; the active runtime is unchanged");
+        }
     }
 
     private static void linkProduct(File workspace, File log, File nativeDir, File clang, File bin,
