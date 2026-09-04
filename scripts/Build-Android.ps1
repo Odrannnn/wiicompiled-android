@@ -34,7 +34,9 @@ try {
     } else {
         Write-Warning "Canonical signing key is unavailable at $privateSigningKey; this build cannot update the target tablet."
     }
-    & .\gradlew.bat --console=plain assembleDebug testDebugUnitTest lintDebug
+    # The Builder uses the same debug variant name with configuration-time source sets.
+    # Cleaning prevents Gradle from reusing a Builder package for the public Port Lab.
+    & .\gradlew.bat --console=plain clean assembleDebug testDebugUnitTest lintDebug
     if ($LASTEXITCODE -ne 0) { throw 'Android build or verification failed.' }
 } finally {
     $env:GRADLE_USER_HOME = $previousGradleHome
@@ -45,6 +47,15 @@ $artifactsPath = Join-Path $portRoot 'artifacts'
 New-Item -ItemType Directory -Force $artifactsPath | Out-Null
 Copy-Item (Join-Path $portRoot 'android/app/build/outputs/apk/debug/app-debug.apk') (Join-Path $artifactsPath 'WiiCompiled-PortLab-debug.apk')
 $builtApk = Join-Path $artifactsPath 'WiiCompiled-PortLab-debug.apk'
+Add-Type -AssemblyName System.IO.Compression
+$publicZip = [IO.Compression.ZipFile]::OpenRead($builtApk)
+try {
+    foreach ($entry in $publicZip.Entries) {
+        if ($entry.FullName -match '(?i)(compiler-sdk\.zip|runtime-sdk\.zip|libwiicompiled_(translator|clang|lld|llvm_ar)\.so|main\.dol|StaticR\.rel|libWiiCompiled\.so|libRetroRewind\.so|\.(rvz|iso|wbfs)$)') {
+            throw "Builder or private game material entered the public Port Lab APK: $($entry.FullName)"
+        }
+    }
+} finally { $publicZip.Dispose() }
 if (Test-Path -LiteralPath (Join-Path $SigningDirectory 'debug.keystore') -PathType Leaf) {
     $apksigner = Join-Path $SdkPath 'build-tools/36.0.0/apksigner.bat'
     $certificateOutput = (& $apksigner verify --print-certs $builtApk 2>&1 | Out-String)

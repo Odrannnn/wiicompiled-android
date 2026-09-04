@@ -35,7 +35,10 @@ try {
     New-Item -ItemType Directory -Force $env:GRADLE_USER_HOME,$env:ANDROID_USER_HOME | Out-Null
     Copy-Item -LiteralPath $signingKey -Destination (Join-Path $env:ANDROID_USER_HOME 'debug.keystore') -Force
     Push-Location (Join-Path $portRoot 'android')
-    try { & .\gradlew.bat --console=plain -PwithBuilder assembleDebug }
+    # withBuilder changes source sets and packaging, but Gradle does not treat a project
+    # property used during configuration as an assembleDebug task input. Clean first so a
+    # prior Port Lab build can never be reused as the Builder artifact.
+    try { & .\gradlew.bat --console=plain -PwithBuilder clean assembleDebug }
     finally { Pop-Location }
     if ($LASTEXITCODE -ne 0) { throw 'Builder APK build failed.' }
 } finally { $env:GRADLE_USER_HOME=$oldGradle; $env:ANDROID_USER_HOME=$oldAndroid }
@@ -52,9 +55,20 @@ if (-not $certificate.Success -or $certificate.Groups[1].Value.ToUpperInvariant(
 Add-Type -AssemblyName System.IO.Compression
 $zip = [IO.Compression.ZipFile]::OpenRead($apk)
 try {
+    $entries = @{}
     foreach ($entry in $zip.Entries) {
+        $entries[$entry.FullName] = $true
         if ($entry.FullName -match '(?i)(main\.dol|StaticR\.rel|libWiiCompiled\.so|libRetroRewind\.so|\.(rvz|iso|wbfs)$)') {
             throw "Private game material entered the Builder APK: $($entry.FullName)"
+        }
+    }
+    foreach ($requiredEntry in @(
+            'assets/compiler-sdk.zip', 'assets/runtime-sdk.zip',
+            'lib/arm64-v8a/libwiicompiled_translator.so',
+            'lib/arm64-v8a/libwiicompiled_clang.so',
+            'lib/arm64-v8a/libwiicompiled_lld.so')) {
+        if (-not $entries.ContainsKey($requiredEntry)) {
+            throw "Builder APK is missing its required payload: $requiredEntry"
         }
     }
 } finally { $zip.Dispose() }
