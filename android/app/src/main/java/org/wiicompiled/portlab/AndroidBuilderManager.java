@@ -18,7 +18,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.Comparator;
+import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -314,18 +316,45 @@ final class AndroidBuilderManager {
         builder.environment().put("LD_LIBRARY_PATH", nativeDir.getAbsolutePath());
         builder.environment().put("TMPDIR", new File(directory, "tmp").getAbsolutePath());
         new File(directory, "tmp").mkdirs();
+        Deque<String> tail = new ArrayDeque<>();
         try (FileWriter writer = new FileWriter(log, true)) {
             writer.write("\n$ " + String.join(" ", command) + "\n"); writer.flush();
             Process process = builder.start(); activeProcess = process;
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-                for (String line; (line = reader.readLine()) != null;) { writer.write(line); writer.write('\n'); }
+                for (String line; (line = reader.readLine()) != null;) {
+                    writer.write(line); writer.write('\n');
+                    if (tail.size() == 8) tail.removeFirst();
+                    tail.addLast(line.length() > 240 ? line.substring(0, 240) + "…" : line);
+                }
             }
             try {
-                int code = process.waitFor(); if (code != 0) throw new IOException("Build command failed (exit " + code + "). See " + log);
+                int code = process.waitFor();
+                if (code != 0) {
+                    checkCancelled();
+                    throw new IOException(buildFailure(code, tail));
+                }
             } catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new IOException("Android build interrupted", error); }
             finally { activeProcess = null; }
         }
         checkCancelled();
+    }
+
+    private static String buildFailure(int code, Deque<String> tail) {
+        String signal = switch (code) {
+            case 133 -> " (SIGTRAP: tool assertion or explicit trap)";
+            case 134 -> " (SIGABRT: tool aborted after a fatal error)";
+            case 137 -> " (SIGKILL: Android likely reclaimed the process for memory or thermal pressure)";
+            case 139 -> " (SIGSEGV: native tool accessed invalid memory)";
+            case 143 -> " (SIGTERM: process was terminated)";
+            default -> "";
+        };
+        StringBuilder message = new StringBuilder("Build command failed with exit ")
+            .append(code).append(signal).append(". Export the latest build log from Tools for the full output.");
+        if (!tail.isEmpty()) {
+            message.append("\n\nLast output:");
+            for (String line : tail) message.append('\n').append(line);
+        }
+        return message.toString();
     }
 
     private static void extractAsset(Context context, String name, File destination) throws IOException {
