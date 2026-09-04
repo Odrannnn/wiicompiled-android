@@ -1477,6 +1477,25 @@ index 1987cd5..21d1dad 100644
      endif()
  endforeach()
 +
+diff --git a/runtime/include/audio_backend.h b/runtime/include/audio_backend.h
+index ae05827..09d2b6c 100644
+--- a/runtime/include/audio_backend.h
++++ b/runtime/include/audio_backend.h
+@@ -22,6 +22,7 @@ public:
+     // Applied to the final host output, covering both AX and direct AI DMA.
+     void SetMasterVolume(float volume);
+     void SetMuted(bool muted);
++    void SetQueueLimitMilliseconds(uint32_t milliseconds);
+ 
+ private:
+     AudioBackend() = default;
+@@ -44,5 +45,6 @@ private:
+     float m_masterVolume = 1.0f;
+     bool m_muted = false;
+     bool m_reportedDroppedBlock = false;
++    uint32_t m_queueLimitMilliseconds = 120;
+     std::vector<int16_t> m_convertBuffer;
+ };
 diff --git a/runtime/include/hle/riivolution_contract.h b/runtime/include/hle/riivolution_contract.h
 index 3839cbf..69f7312 100644
 --- a/runtime/include/hle/riivolution_contract.h
@@ -1542,10 +1561,18 @@ index 0000000..952b8e3
 +}
 +}
 diff --git a/runtime/include/runtime_config.h b/runtime/include/runtime_config.h
-index c7a93c4..c175b28 100644
+index c7a93c4..c69c11c 100644
 --- a/runtime/include/runtime_config.h
 +++ b/runtime/include/runtime_config.h
-@@ -68,6 +68,8 @@ struct RuntimeUserConfig {
+@@ -51,6 +51,7 @@ struct RuntimeUserConfig {
+     std::optional<float> audioVoicesVolume;
+     std::optional<bool> audioMuted;
+     std::optional<bool> audioMixWorker;
++    std::optional<uint32_t> audioQueueMilliseconds;
+     std::optional<bool> attenuateMusicWhenMediaPlays;
+     std::optional<bool> networkEnabled;
+     std::optional<bool> discordPresenceEnabled;
+@@ -68,6 +69,8 @@ struct RuntimeUserConfig {
      // comma-separated SDL-style physical button names ("south", or
      // "dpad_up,left_shoulder") as values; pressing either bound button counts.
      std::array<std::optional<std::string>, 12> controllerButtons;
@@ -1554,7 +1581,22 @@ index c7a93c4..c175b28 100644
  };
  
  namespace RuntimeConfigFile {
-@@ -159,7 +161,12 @@ inline bool IsSupportedFrameInterpolationFps(uint32_t value) {
+@@ -87,6 +90,14 @@ inline std::filesystem::path PathFromUtf8(std::string_view text) {
+ inline constexpr const char* kConfigFileName = "Config.toml";
+ inline constexpr const char* kApplicationDirectoryName = "WiiCompiled";
+ 
++inline constexpr uint32_t DefaultAudioQueueMilliseconds() {
++#if defined(__ANDROID__)
++    return 64;
++#else
++    return 120;
++#endif
++}
++
+ // Portable layout. A directory holding kPortableMarkerFileName is a portable root; every piece of
+ // runtime user state (Config.toml, NAND, Cache, Logs) lives in <root>/UserData instead of
+ // %LOCALAPPDATA%. The marker is searched for from the executable's directory upwards, which is what
+@@ -159,7 +170,12 @@ inline bool IsSupportedFrameInterpolationFps(uint32_t value) {
  }
  
  inline std::optional<std::filesystem::path> ExecutableDirectory() {
@@ -1568,7 +1610,7 @@ index c7a93c4..c175b28 100644
      std::wstring buffer(MAX_PATH, L'\0');
      for (;;) {
          const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
-@@ -219,6 +226,13 @@ inline const std::optional<std::filesystem::path>& PortableRootDirectory() {
+@@ -219,6 +235,13 @@ inline const std::optional<std::filesystem::path>& PortableRootDirectory() {
  }
  
  inline std::filesystem::path ApplicationDataDirectory() {
@@ -1582,7 +1624,17 @@ index c7a93c4..c175b28 100644
      if (const auto& portableRoot = PortableRootDirectory()) {
          return *portableRoot / kPortableUserDataDirectoryName;
      }
-@@ -373,6 +387,11 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
+@@ -284,6 +307,9 @@ inline void EnsureConfigFile() {
+               "ui_volume = 1.0\n"
+               "voices_volume = 1.0\n"
+               "muted = false\n"
++              "# Maximum queued host audio. Lower values reduce latency; higher values\n"
++              "# tolerate longer frame stalls before a block must be dropped.\n"
++              "queue_ms = " << DefaultAudioQueueMilliseconds() << "\n"
+               "attenuate_music_when_media_plays = false\n"
+               "# Runs the AX/DSP voice mix on its own thread, joined before the\n"
+               "# guest can observe it. Set to false to mix inline on the guest\n"
+@@ -373,6 +399,11 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
          config.controllerButtons[index] =
              FindConfigValue<std::string>(document, "controller", buttonKeys[index]);
      }
@@ -1594,7 +1646,18 @@ index c7a93c4..c175b28 100644
  
      config.widescreen = FindConfigValue<bool>(document, "video", "widescreen");
      config.windowPosX = FindConfigInt(document, "video", "window_x");
-@@ -483,6 +502,14 @@ inline const std::optional<std::string>& ControllerButton(size_t index) {
+@@ -426,6 +457,10 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
+     config.audioVoicesVolume = readVolume("voices_volume");
+     config.audioMuted = FindConfigValue<bool>(document, "audio", "muted");
+     config.audioMixWorker = FindConfigValue<bool>(document, "audio", "mix_worker");
++    if (auto value = FindConfigUint(document, "audio", "queue_ms");
++        value && *value >= 32 && *value <= 200) {
++        config.audioQueueMilliseconds = *value;
++    }
+     config.attenuateMusicWhenMediaPlays =
+         FindConfigValue<bool>(document, "audio", "attenuate_music_when_media_plays");
+     config.networkEnabled = FindConfigValue<bool>(document, "network", "enabled");
+@@ -483,6 +518,14 @@ inline const std::optional<std::string>& ControllerButton(size_t index) {
      return index < Get().controllerButtons.size() ? Get().controllerButtons[index] : empty;
  }
  
@@ -1609,7 +1672,7 @@ index c7a93c4..c175b28 100644
  // Update one TOML value without discarding comments, unrelated settings, or
  // user-specific paths. This is used by the in-game F10 settings bar.
  inline bool WriteSetting(std::string_view section, std::string_view key, std::string_view value) {
-@@ -638,6 +665,19 @@ inline bool SetControllerButton(size_t index, std::string value) {
+@@ -638,6 +681,19 @@ inline bool SetControllerButton(size_t index, std::string value) {
      return WriteSetting("controller", kControllerButtonKeys[index], FormatString(value));
  }
  
@@ -1629,7 +1692,41 @@ index c7a93c4..c175b28 100644
  inline bool SetAudioVolume(float value) {
      value = std::clamp(value, 0.0f, 1.0f);
      Mutable().audioVolume = value;
-@@ -909,3 +949,4 @@ inline void LogLoadedConfig() {
+@@ -688,6 +744,12 @@ inline bool SetAudioMixWorker(bool value) {
+     return WriteSetting("audio", "mix_worker", value ? "true" : "false");
+ }
+ 
++inline bool SetAudioQueueMilliseconds(uint32_t value) {
++    value = std::clamp(value, 32u, 200u);
++    Mutable().audioQueueMilliseconds = value;
++    return WriteSetting("audio", "queue_ms", std::to_string(value));
++}
++
+ inline bool SetAttenuateMusicWhenMediaPlays(bool value) {
+     Mutable().attenuateMusicWhenMediaPlays = value;
+     return WriteSetting("audio", "attenuate_music_when_media_plays", value ? "true" : "false");
+@@ -747,6 +809,10 @@ inline bool AudioMixWorkerEnabled(bool fallback = true) {
+     return Get().audioMixWorker.value_or(fallback);
+ }
+ 
++inline uint32_t AudioQueueMilliseconds(uint32_t fallback = DefaultAudioQueueMilliseconds()) {
++    return std::clamp(Get().audioQueueMilliseconds.value_or(fallback), 32u, 200u);
++}
++
+ inline bool AttenuateMusicWhenMediaPlays(bool fallback = false) {
+     return Get().attenuateMusicWhenMediaPlays.value_or(fallback);
+ }
+@@ -889,6 +955,9 @@ inline void LogLoadedConfig() {
+             if (config.audioMuted) {
+                 std::cout << " audio_muted=" << (*config.audioMuted ? "true" : "false");
+             }
++            if (config.audioQueueMilliseconds) {
++                std::cout << " audio_queue_ms=" << *config.audioQueueMilliseconds;
++            }
+             if (config.networkEnabled) {
+                 std::cout << " network_enabled=" << (*config.networkEnabled ? "true" : "false");
+             }
+@@ -909,3 +978,4 @@ inline void LogLoadedConfig() {
  }
  
  } // namespace RuntimeConfigFile
@@ -1857,6 +1954,37 @@ index 0000000..01c23c5
 +}  // namespace dawn
 +
 +#endif
+diff --git a/runtime/src/audio_backend.cpp b/runtime/src/audio_backend.cpp
+index 7ceda4c..844ac0b 100644
+--- a/runtime/src/audio_backend.cpp
++++ b/runtime/src/audio_backend.cpp
+@@ -36,6 +36,12 @@ void AudioBackend::SetMuted(bool muted) {
+     ApplyGainLocked();
+ }
+ 
++void AudioBackend::SetQueueLimitMilliseconds(uint32_t milliseconds) {
++    std::lock_guard<std::mutex> lock(m_mutex);
++    m_queueLimitMilliseconds = std::clamp(milliseconds, 32u, 200u);
++    m_reportedDroppedBlock = false;
++}
++
+ bool AudioBackend::EnsureInitializedLocked(uint32_t sampleRate, uint32_t channels) {
+     if (m_initialized && m_sampleRate == sampleRate && m_channels == channels) {
+         return true;
+@@ -104,12 +110,10 @@ void AudioBackend::Shutdown() {
+ }
+ 
+ uint32_t AudioBackend::QueueLimitBytesLocked() const {
+-    constexpr uint32_t queueMs = 120;
+-
+     const uint64_t bytesPerSecond = static_cast<uint64_t>(m_spec.freq) *
+                                     static_cast<uint64_t>(m_spec.channels) *
+                                     sizeof(int16_t);
+-    return static_cast<uint32_t>((bytesPerSecond * queueMs) / 1000u);
++    return static_cast<uint32_t>((bytesPerSecond * m_queueLimitMilliseconds) / 1000u);
+ }
+ 
+ bool AudioBackend::QueueHasCapacityLocked(int incomingBytes) {
 diff --git a/runtime/src/controller_mapping_wizard.cpp b/runtime/src/controller_mapping_wizard.cpp
 index fe1ba1d..cf539d6 100644
 --- a/runtime/src/controller_mapping_wizard.cpp
@@ -2587,7 +2715,7 @@ index f10a290..128e8ea 100644
  extern "C" bool g_dynamicAspectRatioEnabled = false;
 +
 diff --git a/runtime/src/settings_overlay.cpp b/runtime/src/settings_overlay.cpp
-index a48415d..490760b 100644
+index a48415d..4f92153 100644
 --- a/runtime/src/settings_overlay.cpp
 +++ b/runtime/src/settings_overlay.cpp
 @@ -63,7 +63,22 @@ const char* GraphicsApiDisplayName() {
@@ -2613,7 +2741,15 @@ index a48415d..490760b 100644
  int g_controllerPort = 0;
  float g_resolutionScale = RuntimeConfigFile::ResolutionMultiplier(1.0f);
  int g_audioVolumePercent = static_cast<int>(std::lround(RuntimeConfigFile::AudioVolume(1.0f) * 100.0f));
-@@ -98,6 +113,8 @@ int g_displayMode = [] {
+@@ -74,6 +89,7 @@ int g_uiVolumePercent = static_cast<int>(std::lround(RuntimeConfigFile::UiVolume
+ int g_voicesVolumePercent = static_cast<int>(std::lround(RuntimeConfigFile::VoicesVolume(1.0f) * 100.0f));
+ bool g_audioMuted = RuntimeConfigFile::AudioMuted(false);
+ bool g_audioMixWorker = RuntimeConfigFile::AudioMixWorkerEnabled(true);
++int g_audioQueueMilliseconds = static_cast<int>(RuntimeConfigFile::AudioQueueMilliseconds());
+ bool g_attenuateMusicWhenMediaPlays = RuntimeConfigFile::AttenuateMusicWhenMediaPlays(false);
+ int g_frameInterpolationMode = [] {
+     switch (RuntimeConfigFile::FrameInterpolationFps(0)) {
+@@ -98,6 +114,8 @@ int g_displayMode = [] {
  bool g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
  bool g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
  bool g_showFps = RuntimeConfigFile::ShowFps(true);
@@ -2622,7 +2758,7 @@ index a48415d..490760b 100644
  uint32_t g_disabledPostProcessingPaths = RuntimeConfigFile::DisabledPostProcessingPaths(0);
  std::array<int32_t, PAD_MAX_CONTROLLERS> g_configuredControllerIndices = [] {
      std::array<int32_t, PAD_MAX_CONTROLLERS> indices{};
-@@ -360,6 +377,23 @@ void DrawControllerSettings() {
+@@ -360,6 +378,23 @@ void DrawControllerSettings() {
      PADButtonMapping* altMappings =
          PADGetAltButtonMappings(static_cast<uint32_t>(g_controllerPort), &altMappingCount);
  
@@ -2646,7 +2782,7 @@ index a48415d..490760b 100644
      const auto writeBinding = [](size_t index, uint32_t primaryNative, uint32_t altNative) {
          std::string value = NativeButtonForValue(primaryNative).configName;
          if (altNative != PAD_NATIVE_BUTTON_INVALID) {
-@@ -433,7 +467,7 @@ void DrawControllerSettings() {
+@@ -433,7 +468,7 @@ void DrawControllerSettings() {
  
          const NativeButtonItem& current = NativeButtonForValue(mappingIt->nativeButton);
          ImGui::PushID(static_cast<int>(i));
@@ -2655,7 +2791,7 @@ index a48415d..490760b 100644
          if (ImGui::BeginCombo("##primary", current.label)) {
              for (const auto& candidate : kNativeButtons) {
                  const bool selected = candidate.nativeButton == mappingIt->nativeButton;
-@@ -466,7 +500,7 @@ void DrawControllerSettings() {
+@@ -466,7 +501,7 @@ void DrawControllerSettings() {
                  ImGui::TextUnformatted("or");
                  ImGui::SameLine();
                  const char* altLabel = altBound ? NativeButtonForValue(altIt->nativeButton).label : "None";
@@ -2664,7 +2800,7 @@ index a48415d..490760b 100644
                  if (ImGui::BeginCombo("##alt", altLabel)) {
                      for (const auto& candidate : kNativeButtons) {
                          const bool isNone = candidate.nativeButton == PAD_NATIVE_BUTTON_INVALID;
-@@ -495,7 +529,7 @@ void DrawControllerSettings() {
+@@ -495,7 +530,7 @@ void DrawControllerSettings() {
  }
  
  void DrawAudioSettings() {
@@ -2673,7 +2809,25 @@ index a48415d..490760b 100644
      if (ImGui::SliderInt("Master", &g_audioVolumePercent, 0, 100, "%d%%")) {
          const float volume = static_cast<float>(g_audioVolumePercent) / 100.0f;
          AudioBackend::Instance().SetMasterVolume(volume);
-@@ -645,6 +679,34 @@ void DrawGraphicsSettings() {
+@@ -537,6 +572,17 @@ void DrawAudioSettings() {
+             "Runs the AX/DSP voice mix off the game thread. Turn this off if you "
+             "suspect an audio problem; the mix then runs inline as it used to.");
+     }
++    ImGui::SetNextItemWidth(UiSize(220.0f));
++    if (ImGui::SliderInt("Audio buffer", &g_audioQueueMilliseconds, 32, 200, "%d ms")) {
++        AudioBackend::Instance().SetQueueLimitMilliseconds(
++            static_cast<uint32_t>(g_audioQueueMilliseconds));
++        RuntimeConfigFile::SetAudioQueueMilliseconds(
++            static_cast<uint32_t>(g_audioQueueMilliseconds));
++    }
++    if (ImGui::IsItemHovered()) {
++        ImGui::SetTooltip(
++            "Lower values reduce output latency. Raise this if long frames cause crackling or dropped audio blocks.");
++    }
+     ImGui::Separator();
+     if (ImGui::Checkbox("Mute game music while external media is playing",
+                         &g_attenuateMusicWhenMediaPlays)) {
+@@ -645,6 +691,34 @@ void DrawGraphicsSettings() {
      }
      ImGui::Separator();
      ImGui::Text("Graphics API: %s", GraphicsApiDisplayName());
@@ -2708,7 +2862,7 @@ index a48415d..490760b 100644
  }
  
  void DrawFpsOverlay() {
-@@ -655,9 +717,15 @@ void DrawFpsOverlay() {
+@@ -655,9 +729,15 @@ void DrawFpsOverlay() {
      }
  
      const ImGuiIO& io = ImGui::GetIO();
@@ -2727,7 +2881,7 @@ index a48415d..490760b 100644
      ImGui::SetNextWindowBgAlpha(0.55f);
      constexpr ImGuiWindowFlags kFlags = ImGuiWindowFlags_AlwaysAutoResize |
                                           ImGuiWindowFlags_NoDecoration |
-@@ -673,6 +741,8 @@ void DrawFpsOverlay() {
+@@ -673,6 +753,8 @@ void DrawFpsOverlay() {
              // Present timing includes the additional frames produced by
              // interpolation, so this remains the actual displayed FPS.
              ImGui::Text("FPS: %.1f", presentTiming.framesPerSecond);
@@ -2736,7 +2890,7 @@ index a48415d..490760b 100644
              // Replay-unsafe frames hold the presented cadence with duplicated
              // slots, so the counter alone reads 180 while the motion on screen
              // is 60 Hz. Surface the divergence instead of hiding it.
-@@ -692,9 +762,14 @@ void DrawShaderCompilationStatus() {
+@@ -692,9 +774,14 @@ void DrawShaderCompilationStatus() {
          return;
      }
  
@@ -2754,7 +2908,7 @@ index a48415d..490760b 100644
      ImGui::SetNextWindowBgAlpha(0.55f);
      ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(7.0f, 4.0f));
      constexpr ImGuiWindowFlags kFlags = ImGuiWindowFlags_AlwaysAutoResize |
-@@ -707,6 +782,11 @@ void DrawShaderCompilationStatus() {
+@@ -707,6 +794,11 @@ void DrawShaderCompilationStatus() {
      if (ImGui::Begin("Shader Compilation Status", nullptr, kFlags)) {
          ImGui::SetWindowFontScale(0.85f);
          ImGui::Text("%u shader%s compiling", queuedPipelines, queuedPipelines == 1 ? "" : "s");
@@ -2766,7 +2920,7 @@ index a48415d..490760b 100644
      }
      ImGui::End();
      ImGui::PopStyleVar();
-@@ -745,17 +825,53 @@ void DrawStartupScreen() {
+@@ -745,17 +837,53 @@ void DrawStartupScreen() {
  }
  
  void DrawTopBar() {
@@ -2824,7 +2978,7 @@ index a48415d..490760b 100644
      if (ImGui::BeginMenu(resolutionMenuLabel.c_str())) {
          for (const auto& resolution : kResolutions) {
              const bool selected = std::fabs(resolution.scale - g_resolutionScale) < 0.001f;
-@@ -775,7 +891,7 @@ void DrawTopBar() {
+@@ -775,7 +903,7 @@ void DrawTopBar() {
          ImGui::EndMenu();
      }
  
@@ -2833,7 +2987,7 @@ index a48415d..490760b 100644
          DrawControllerSettings();
          ImGui::EndMenu();
      }
-@@ -786,7 +902,7 @@ void DrawTopBar() {
+@@ -786,7 +914,7 @@ void DrawTopBar() {
      // Keep the popup ID stable while the Master slider changes the visible
      // label. Without the ### suffix, ImGui treats every new percentage as a
      // different menu and closes the popup on the first drag update.
@@ -2842,7 +2996,7 @@ index a48415d..490760b 100644
      if (ImGui::BeginMenu(audioMenuLabel.c_str())) {
          DrawAudioSettings();
          ImGui::EndMenu();
-@@ -797,7 +913,9 @@ void DrawTopBar() {
+@@ -797,7 +925,9 @@ void DrawTopBar() {
      if (ImGui::MenuItem("Hide (F10)")) {
          SetTopBarVisible(false);
      }
@@ -2853,15 +3007,19 @@ index a48415d..490760b 100644
  }
  
  bool IsToggleKey(const SDL_Event& event, SDL_Scancode code) {
-@@ -848,6 +966,7 @@ void PersistDisplayModeIfChanged() {
+@@ -848,8 +978,11 @@ void PersistDisplayModeIfChanged() {
  void InitializeRuntimeSettings() noexcept {
      controller_mapping_wizard::LoadPersistedMappings();
      ApplyConfiguredMappings();
 +    PADConfigureGyroTricks(g_gyroTricks ? TRUE : FALSE, g_gyroTrickThreshold);
      AudioBackend::Instance().SetMasterVolume(static_cast<float>(g_audioVolumePercent) / 100.0f);
      AudioBackend::Instance().SetMuted(g_audioMuted);
++    AudioBackend::Instance().SetQueueLimitMilliseconds(
++        static_cast<uint32_t>(g_audioQueueMilliseconds));
      MusicAttenuation::SetMusicVolume(static_cast<float>(g_musicVolumePercent) / 100.0f);
-@@ -892,15 +1011,17 @@ void HandleEvents(const AuroraEvent* events) noexcept {
+     MusicAttenuation::SetSoundEffectsVolume(static_cast<float>(g_soundEffectsVolumePercent) / 100.0f);
+     MusicAttenuation::SetUiVolume(static_cast<float>(g_uiVolumePercent) / 100.0f);
+@@ -892,15 +1025,17 @@ void HandleEvents(const AuroraEvent* events) noexcept {
  void Draw() noexcept {
      // Wait for the frame worker's DONE phase: it has replayed the previous frame's ImGui draw lists
      // and started the next ImGui frame, so all overlay callers can now safely issue ImGui commands.
