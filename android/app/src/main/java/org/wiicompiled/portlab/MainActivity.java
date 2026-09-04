@@ -498,7 +498,7 @@ public final class MainActivity extends Activity {
             catch (LinkageError | RuntimeException e) { result = "FAIL: native checks unavailable: " + e; }
             String text = "Device: " + android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL
                 + "\nAndroid " + android.os.Build.VERSION.RELEASE + " (API " + android.os.Build.VERSION.SDK_INT
-                + ")\n\n" + result;
+                + ")\n\n" + result + NetworkDiagnostics.run(this);
             // App-private file allows adb run-as to retrieve exactly what was displayed.
             try (OutputStream file = openFileOutput("diagnostics.txt", MODE_PRIVATE)) {
                 file.write(text.getBytes(StandardCharsets.UTF_8));
