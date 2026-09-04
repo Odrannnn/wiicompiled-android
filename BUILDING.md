@@ -210,13 +210,15 @@ You can then use the on-device picker to extract the disc. The older ADB deploym
 
 ## Release procedure
 
-Use one commit per logical change. Before publishing the normal and Builder editions:
+Use one commit per logical change. Before publishing the normal and Builder editions, keep this order so the release candidate is always the final output:
 
 ```powershell
 git status --short
 .\scripts\Build-Android.ps1
 .\scripts\Build-BuilderApk.ps1
 ```
+
+Both scripts clean the shared Gradle debug output before assembling and enforce opposite payload gates. The public Port Lab rejects Builder tool archives and executable payloads; the Builder requires its compiler/runtime SDK and ARM64 tools while rejecting game-derived material. Do not replace these with a bare `assembleDebug`, because the `withBuilder` configuration property changes source sets without changing the Gradle variant name.
 
 Then verify the candidate APK:
 
