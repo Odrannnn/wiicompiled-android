@@ -252,7 +252,8 @@ public final class MainActivity extends Activity {
             startActivityForResult(intent, EXPORT_REPORT);
         });
         LinearLayout about = card("About this build",
-            "Experimental local build. No copyrighted game image is bundled or downloaded by WiiCompiled.");
+            "Version " + BuildConfig.VERSION_NAME + ". No copyrighted game image is bundled or downloaded by WiiCompiled.");
+        button(about, "Check for app updates", v -> checkForAppUpdate());
         button(about, "View licenses and upstream sources", v -> {
             try (InputStream stream = getAssets().open("NOTICES.txt")) {
                 new android.app.AlertDialog.Builder(this).setTitle("Licenses and upstream sources")
@@ -263,6 +264,34 @@ public final class MainActivity extends Activity {
             }
         });
         addPair(page, checks, about, wide); return pageScroll(page);
+    }
+
+    private void checkForAppUpdate() {
+        diagnostics.setText("Checking official GitHub releases…");
+        worker.execute(() -> {
+            try {
+                AppUpdateChecker.Result result = AppUpdateChecker.check();
+                runOnUiThread(() -> {
+                    if (stopped) return;
+                    if (!result.updateAvailable()) {
+                        diagnostics.setText("WiiCompiled Android " + result.currentVersion() + " is current.");
+                        return;
+                    }
+                    diagnostics.setText("Update available: " + result.latestVersion());
+                    new android.app.AlertDialog.Builder(this).setTitle("App update available")
+                        .setMessage("Installed: " + result.currentVersion() + "\nAvailable: "
+                            + result.latestVersion() + "\n\nOpen the signed GitHub release to review and download it?")
+                        .setNegativeButton("Later", null)
+                        .setPositiveButton("Open release", (dialog, which) -> {
+                            try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(result.releaseUrl()))); }
+                            catch (RuntimeException error) { diagnostics.setText("Could not open release: " + error.getMessage()); }
+                        }).show();
+                });
+            } catch (Exception error) {
+                String message = "Update check failed: " + error.getMessage();
+                runOnUiThread(() -> { if (!stopped) diagnostics.setText(message); });
+            }
+        });
     }
 
     private void launchGame() {
